@@ -1,0 +1,2333 @@
+---
+title: "ElectricityRateScrape"
+author: "Jake Stid"
+date: '2023-05-19'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# WD & Packages
+```{r}
+# Set working directory
+wd <- "S://Users/stidjaco/R_files/Chapter_2/"
+setwd(wd)
+outdir <- "S://Users/stidjaco/R_files/Chapter_2/Data/Derived/UtilRates/"
+
+# Packages for Processing 
+library(sf)
+library(lwgeom)
+library(tidyverse)
+library(base)
+library(dplyr)
+library(stringr)
+library(showtext)
+library(sp)
+library(rgdal)
+library(raster)
+library(rgeos)
+library(ggplot2)
+library(ggpubr)
+library(miscTools)
+library(lubridate)
+library(tigris)
+library(pdftools)
+library(readxl)
+```
+
+The goal of this code is to generate four dataframes for each major utility district in California for every year of operation between 2008 and 2018.
+There are two system sizes for each utility, "small" and "large", and we want to know the "Service+Energy" charge and the "Energy" charge. 
+
+# Get Bundled System Average Rates (SAR) & create base empty dataframe to copy and fill with rates
+```{r}
+# Get Bundled SAR rates to fill gaps in data -- https://www.cpuc.ca.gov/industries-and-topics/electrical-energy/electric-costs/historical-electric-cost-data/bundled-system-average
+year <- c(2006:2020)
+SCE <- c(14.72, 13.93, 13.74, 14.21, 14.22, 14.14, 14.34, 15.87, 15.70, 16.27, 14.86, 15.73, 15.97, 15.88, 18.52)
+PGE <- c(13.76, 14.00, 13.72, 14.41, 15.38, 15.06, 15.30, 15.70, 16.31, 17.18, 17.78, 18.61, 19.55, 19.99, 21.09)
+SDGE<- c(13.94, 14.51, 13.61, 16.73, 16.11, 15.96, 15.45, 16.27, 18.13, 20.86, 20.37, 21.78, 24.00, 23.74, 24.07)
+
+# Combine and check graph -- hsould look exactly like graph from https://www.cpuc.ca.gov/industries-and-topics/electrical-energy/electric-costs/historical-electric-cost-data/bundled-system-average
+bun_SAR <- data.frame(Year = year, SCE = SCE, PGE = PGE, SDGE = SDGE)
+bSAR_plot <- ggplot(bun_SAR, aes(x=Year)) +
+  geom_line(aes(y=SCE), color="darkblue", lwd=0.8) +
+  geom_line(aes(y=PGE), color="darkred", lwd=0.8) +
+  geom_line(aes(y=SDGE), color="darkgreen", lwd=0.8) +
+  ggtitle("Bundled System Average Rate") +
+  ylab("$/kWh") +
+  scale_y_continuous(breaks = seq(0, 30, 5), limits = c(0, 30)) +
+  scale_x_continuous(breaks = seq(2006, 2020, 1)) +
+  theme_minimal() +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank())
+rm(PGE, SCE, SDGE, year, bSAR_plot)
+
+# Get rate of change in prices for all three utilities
+bun_SAR[,2:4] <- bun_SAR[,2:4] / lag(bun_SAR[,2:4])
+
+# Create empty base dataframe 
+df <- data.frame(matrix(NA, nrow = 24, ncol = 365))
+rownames(df) <- c(1:24)
+colnames(df) <- c(1:365)
+```
+
+# ~~~~~~~~~~~~~~~~~~~ #
+#        SMUD         #
+# ~~~~~~~~~~~~~~~~~~~ #
+
+# SMUD Years with Reports (or projections)
+```{r}
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+## Function to Generate SMUD Rate DF ##
+## ~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~ ##
+getSMUD = function(){
+  # Small Ag Service Charge DF for SMUD 2010
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(serv_small_w, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(serv_small_s, 24)
+  df_out[,c(winDOY:totd)] <- rep(serv_small_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "SmAg_serv_", year, ".csv", sep=""), col_names = FALSE)
+  # Small Ag Energy Charge DF for SMUD 2010
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(energy_small_w, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(energy_small_s, 24)
+  df_out[,c(winDOY:totd)] <- rep(energy_small_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "SmAg_energy_", year, ".csv", sep=""), col_names = FALSE)
+  # Large Ag Service Charge DF for SMUD 2010
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(serv_large_w, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(serv_large_s, 24)
+  df_out[,c(winDOY:totd)] <- rep(serv_large_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "LgAg_serv_", year, ".csv", sep=""), col_names = FALSE)
+  # Large Ag Energy Charge DF for SMUD 2010 first 8,750 kWh/month
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(energy_large_w, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(energy_large_s, 24)
+  df_out[,c(winDOY:totd)] <- rep(energy_large_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "LgAg_energy_", year, ".csv", sep=""), col_names = FALSE)
+  # Large Ag Energy Charge DF for SMUD 2010 additional kWh/month
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(energy_large_w_add, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(energy_large_s_add, 24)
+  df_out[,c(winDOY:totd)] <- rep(energy_large_w_add, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "LgAg_energy_add_", year, ".csv", sep=""), col_names = FALSE)
+  # Large Ag Facility Charge DF for SMUD 2010 first 30kW
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(facil_large_w, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(facil_large_s, 24)
+  df_out[,c(winDOY:totd)] <- rep(facil_large_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "LgAg_facil_", year, ".csv", sep=""), col_names = FALSE)
+  # Large Ag Facility Charge DF for SMUD 2010 additional kWh/month
+  df_out <- df
+  df_out[,c(1:(sumDOY-1))] <- rep(facil_large_w_add, 24)
+  df_out[,c(sumDOY:(winDOY-1))] <- rep(facil_large_s_add, 24)
+  df_out[,c(winDOY:totd)] <- rep(facil_large_w_add, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", "LgAg_facil_add_", year, ".csv", sep=""), col_names = FALSE)
+}
+
+## ~~~~~~~~~~ ##
+## 2010 rates ##
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+serv_small_s = 9.90 # ($/month)
+serv_small_w = 9.90 # ($/month)
+energy_small_s = 0.1198 # ($/kWh)
+energy_small_w = 0.1095 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+serv_large_s = 22.90 # ($/month)
+serv_large_w = 22.90 # ($/month)
+facil_large_s = 0.00 # ($/month) -- First 30 kW
+facil_large_w = 0.00 # ($/month) -- First 30 kW
+facil_large_s_add = 2.25 # ($/month) -- Additional kW/month
+facil_large_w_add = 2.25 # ($/month) -- Additional kW/month
+energy_large_s = 0.1161 # ($/kWh) -- First 8,750 kWh/month
+energy_large_w = 0.1212 # ($/kWh) -- First 8,750 kWh/month
+energy_large_s_add = 0.0840 # ($/kWh) -- Additional kWh/month
+energy_large_w_add = 0.0950 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+year = 2010
+sumDOY = 121
+winDOY = 305
+totd = 365
+getSMUD()
+
+## ~~~~~~~~~~ ##
+## 2011 rates ##
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+serv_small_s = 9.90 # ($/month)
+serv_small_w = 9.90 # ($/month)
+energy_small_s = 0.1198 # ($/kWh)
+energy_small_w = 0.1095 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+serv_large_s = 22.90 # ($/month)
+serv_large_w = 22.90 # ($/month)
+facil_large_s = 0.00 # ($/month) -- First 30 kW
+facil_large_w = 0.00 # ($/month) -- First 30 kW
+facil_large_s_add = 2.25 # ($/month) -- Additional kW/month
+facil_large_w_add = 2.25 # ($/month) -- Additional kW/month
+energy_large_s = 0.1161 # ($/kWh) -- First 8,750 kWh/month
+energy_large_w = 0.1212 # ($/kWh) -- First 8,750 kWh/month
+energy_large_s_add = 0.0840 # ($/kWh) -- Additional kWh/month
+energy_large_w_add = 0.0950 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+year = 2011
+sumDOY = 121
+winDOY = 305
+totd = 365
+getSMUD()
+
+## ~~~~~~~~~~ ##
+## 2013 rates ##
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+serv_small_s = 9.90 # ($/month)
+serv_small_w = 9.90 # ($/month)
+energy_small_s = 0.1198 # ($/kWh)
+energy_small_w = 0.1095 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+serv_large_s = 22.90 # ($/month)
+serv_large_w = 22.90 # ($/month)
+facil_large_s = 0.00 # ($/month) -- First 30 kW
+facil_large_w = 0.00 # ($/month) -- First 30 kW
+facil_large_s_add = 2.25 # ($/month) -- Additional kW/month
+facil_large_w_add = 2.25 # ($/month) -- Additional kW/month
+energy_large_s = 0.1161 # ($/kWh) -- First 8,750 kWh/month
+energy_large_w = 0.1212 # ($/kWh) -- First 8,750 kWh/month
+energy_large_s_add = 0.0840 # ($/kWh) -- Additional kWh/month
+energy_large_w_add = 0.0950 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+year = 2013
+sumDOY = 121
+winDOY = 305
+totd = 365
+getSMUD()
+
+## ~~~~~~~~~~ ##
+## 2014 rates ## -- From 2013 report as "proposed"
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+serv_small_s = 10.15 # ($/month)
+serv_small_w = 10.15 # ($/month)
+energy_small_s = 0.1228 # ($/kWh)
+energy_small_w = 0.1122 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+serv_large_s = 23.45 # ($/month)
+serv_large_w = 23.45 # ($/month)
+facil_large_s = 0.00 # ($/month) -- First 30 kW
+facil_large_w = 0.00 # ($/month) -- First 30 kW
+facil_large_s_add = 2.31 # ($/month) -- Additional kW/month
+facil_large_w_add = 2.31 # ($/month) -- Additional kW/month
+energy_large_s = 0.1190 # ($/kWh) -- First 8,750 kWh/month
+energy_large_w = 0.1242 # ($/kWh) -- First 8,750 kWh/month
+energy_large_s_add = 0.0861 # ($/kWh) -- Additional kWh/month
+energy_large_w_add = 0.0974 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+year = 2014
+sumDOY = 121
+winDOY = 305
+totd = 365
+getSMUD()
+
+## ~~~~~~~~~~ ##
+## 2015 rates ## -- From 2013 report as "proposed"
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+serv_small_s = 10.40 # ($/month)
+serv_small_w = 10.40 # ($/month)
+energy_small_s = 0.1259 # ($/kWh)
+energy_small_w = 0.1150 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+serv_large_s = 24.05 # ($/month)
+serv_large_w = 24.05 # ($/month)
+facil_large_s = 0.00 # ($/month) -- First 30 kW
+facil_large_w = 0.00 # ($/month) -- First 30 kW
+facil_large_s_add = 2.37 # ($/month) -- Additional kW/month
+facil_large_w_add = 2.37 # ($/month) -- Additional kW/month
+energy_large_s = 0.1220 # ($/kWh) -- First 8,750 kWh/month
+energy_large_w = 0.1273 # ($/kWh) -- First 8,750 kWh/month
+energy_large_s_add = 0.0884 # ($/kWh) -- Additional kWh/month
+energy_large_w_add = 0.0999 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+year = 2015
+sumDOY = 121
+winDOY = 305
+totd = 365
+getSMUD()
+
+## ~~~~~~~~~~ ##
+## 2016 rates ## -- From 2015 report as "proposed"
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+serv_small_s = 10.65 # ($/month)
+serv_small_w = 10.65 # ($/month)
+energy_small_s = 0.1291 # ($/kWh)
+energy_small_w = 0.1179 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+serv_large_s = 24.65 # ($/month)
+serv_large_w = 24.65 # ($/month)
+facil_large_s = 0.00 # ($/month) -- First 30 kW
+facil_large_w = 0.00 # ($/month) -- First 30 kW
+facil_large_s_add = 2.43 # ($/month) -- Additional kW/month
+facil_large_w_add = 2.43 # ($/month) -- Additional kW/month
+energy_large_s = 0.1251 # ($/kWh) -- First 8,750 kWh/month
+energy_large_w = 0.1305 # ($/kWh) -- First 8,750 kWh/month
+energy_large_s_add = 0.0906 # ($/kWh) -- Additional kWh/month
+energy_large_w_add = 0.1024 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+year = 2016
+sumDOY = 122
+winDOY = 306
+totd = 366 # Leap year
+getSMUD()
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Using TOU from OpenEI for NEM2.0 years
+
+## ~~~~~~~~~~ ##
+## 2017 rates ## -- From 2015 report as "proposed"
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+#serv_small_s = 10.90 # ($/month)
+#serv_small_w = 10.90 # ($/month)
+#energy_small_s = 0.1324 # ($/kWh)
+#energy_small_w = 0.1209 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+#serv_large_s = 25.30 # ($/month)
+#serv_large_w = 25.30 # ($/month)
+#facil_large_s = 0.00 # ($/month) -- First 30 kW
+#facil_large_w = 0.00 # ($/month) -- First 30 kW
+#facil_large_s_add = 2.49 # ($/month) -- Additional kW/month
+#facil_large_w_add = 2.49 # ($/month) -- Additional kW/month
+#energy_large_s = 0.1283 # ($/kWh) -- First 8,750 kWh/month
+#energy_large_w = 0.1338 # ($/kWh) -- First 8,750 kWh/month
+#energy_large_s_add = 0.0929 # ($/kWh) -- Additional kWh/month
+#energy_large_w_add = 0.1050 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+#year = 2017
+#sumDOY = 121
+#winDOY = 305
+#totd = 365
+#getSMUD()
+
+## ~~~~~~~~~~ ##
+## 2018 rates ## -- From 2017 report as "proposed"
+## ~~~~~~~~~~ ##
+# Small Ag Service ASN (<= 30 kW)
+#serv_small_s = 11.00 # ($/month)
+#serv_small_w = 11.00 # ($/month)
+#energy_small_s = 0.1338 # ($/kWh)
+#energy_small_w = 0.1221 # ($/kWh)
+# Large Ag Service ASN (> 30 kW)
+#serv_large_s = 25.55 # ($/month)
+#serv_large_w = 25.55 # ($/month)
+#facil_large_s = 0.00 # ($/month) -- First 30 kW
+#facil_large_w = 0.00 # ($/month) -- First 30 kW
+#facil_large_s_add = 2.52 # ($/month) -- Additional kW/month
+#facil_large_w_add = 2.52 # ($/month) -- Additional kW/month
+#energy_large_s = 0.1296 # ($/kWh) -- First 8,750 kWh/month
+#energy_large_w = 0.1352 # ($/kWh) -- First 8,750 kWh/month
+#energy_large_s_add = 0.0938 # ($/kWh) -- Additional kWh/month
+#energy_large_w_add = 0.1061 # ($/kWh) -- Additional kWh/month
+# Generate dataframes (Ag rate periods Summer = May 1st through October 31st, winter = November 1st through April 30th) -- May 1st DOY = 121, Nov 1st DOY = 305
+#year = 2018
+#sumDOY = 121
+#winDOY = 305
+#totd = 365
+#getSMUD()
+```
+
+# SMUD NEM2.0 TOU Years (2017 & 2018)
+```{r}
+## Links: 
+# SMUD 2017 small Ag: https://apps.openei.org/USURDB/rate/view/587e9a845457a32e5a316ce9
+# SMUD 2018 small Ag: https://apps.openei.org/USURDB/rate/view/5a54faf05457a37f4f423a7c
+# SMUD 2017 Large Ag: https://apps.openei.org/USURDB/rate/view/587e9ad05457a31645316ce8#1__Basic_Information
+# SMUD 2018 Large Ag: https://apps.openei.org/USURDB/rate/view/5a54fbb55457a3cb48423a7d
+
+# Summer vs winter delin doesnt change for demand charges between years
+sumDOY = 121
+winDOY = 305
+totd = 365
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+
+# Get weekday and weekend indices
+yearDOY <- c(1:365)
+weekend <- c(yearDOY[seq(6, length(yearDOY), 7)], yearDOY[seq(7, length(yearDOY), 7)]) %>% sort()
+weekday <- yearDOY[which(!yearDOY %in% weekend)]
+totd = 365
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Reports from OpenEI (Demand & Fixed Rates)
+# This is largely copied from OpenEI methods for Modesto, Merced, and Turlock Irrigaiton Districts
+getDemand = function(){
+  # Merge winter and summer df based on season
+  df_out = df
+  df_out[, summer] <- rep(demand_s, 24)
+  df_out[, winter] <- rep(demand_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", size, "Ag_demand_", year, ".csv", sep=""), col_names = FALSE)
+}
+
+# Fixed charges also simple, fixed across year at $/month
+getFixed = function(){
+  # Merge winter and summer df based on season
+  df_out = df
+  df_out[, summer] <- rep(fixed_s, 24)
+  df_out[, winter] <- rep(fixed_w, 24)
+  write_csv(df_out, paste(outdir, "SMUD/", size, "Ag_serv_", year, ".csv", sep=""), col_names = FALSE)
+}
+
+## ~~~~~~~~~~~~~~~~~~~~~ SMUD Demand and Fixed Rates for 2017 and 2018
+# Get demand & fixed charges: Large Agriculture Optional Time of Use AG (AOD) 2017
+demand_s = 3.48 # $/kW
+demand_w = 2.49 # $/kW
+fixed_s  = 87.95 # $/month
+fixed_w  = 87.95 # $/month (no distinction, same value)
+year = 2017 # Export values
+size = "Lg"
+getDemand() # Get dataframes
+getFixed() # Get dataframes
+# Get demand & fixed charges: Large Agriculture Optional Time of Use AG (AOD) 2018
+demand_s = 3.51 # $/kW
+demand_w = 2.51 # $/kW
+fixed_s  = 88.85 # $/month
+fixed_w  = 88.85 # $/month (no distinction, same value)
+year = 2018 # Export values
+size = "Lg"
+getDemand() # Get dataframes
+getFixed() # Get dataframes
+
+# Get demand & fixed charges: Small Agricultural Optional Time of Use AG (AON) 2017
+demand_s = 0.00 # $/kW
+demand_w = 0.00 # $/kW
+fixed_s  = 14.60 # $/month
+fixed_w  = 14.60 # $/month (no distinction, same value)
+year = 2017 # Export values
+size = "Sm"
+getDemand() # Get dataframes
+getFixed() # Get dataframes
+# Get demand & fixed charges: Small Agricultural Optional Time of Use AG (AON) 2018
+demand_s = 0.00 # $/kW
+demand_w = 0.00 # $/kW
+fixed_s  = 14.75 # $/month
+fixed_w  = 14.75 # $/month (no distinction, same value)
+year = 2018 # Export values
+size = "Sm"
+getDemand() # Get dataframes
+getFixed() # Get dataframes
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Reports from OpenEI (Energy TOU rates)
+
+# Run function
+getSMUDEnergyTOU <- function(){
+  # Set weekends
+  df_out = df
+  df_out[, c(summer[which(summer %in% weekend)])] <- rep(eng_per2, 24) # Summer Weekends
+  df_out[, c(winter[which(winter %in% weekend)])] <- rep(eng_per4, 24) # Winter Weekends
+  # Set weekdays
+  df_out[, c(summer[which(summer %in% weekday)])] <- c(rep(eng_per2, 14), rep(eng_per1, 6), rep(eng_per2, 4)) # Summer Weekdays
+  df_out[, c(winter[which(winter %in% weekday)])] <- c(rep(eng_per4, 7), rep(eng_per3, 3), rep(eng_per4, 7), rep(eng_per3, 3), rep(eng_per4, 4)) # Winter Weekdays
+  write_csv(df_out, paste(outdir, "SMUD/", size, "Ag_energy_", year, ".csv", sep=""), col_names = FALSE)
+  # Run for adjustments dataframe
+  df_out = df
+  df_out[, yearDOY] <- rep(eng_adjs, 24) # Same for both
+  write_csv(df_out, paste(outdir, "SMUD/", size, "Ag_energy_adj_", year, ".csv", sep=""), col_names = FALSE)
+}
+
+# Small Ag (2017) 
+eng_per1 = 0.2015 # $/kWh
+eng_per2 = 0.1083 # $/kWh
+eng_per3 = 0.1389 # $/kWh
+eng_per4 = 0.1185 # $/kWh
+eng_adjs = 0.0016 # $/kWh -- same for all periods and tiers
+year = 2017
+size = "Sm"
+getSMUDEnergyTOU()
+
+# Large Ag (2017) 
+eng_per1 = 0.2143 # $/kWh
+eng_per2 = 0.1142 # $/kWh
+eng_per3 = 0.1384 # $/kWh
+eng_per4 = 0.1175 # $/kWh
+eng_adjs = 0.0016 # $/kWh -- same for all periods and tiers
+year = 2017
+size = "Lg"
+getSMUDEnergyTOU()
+
+# Small Ag (2018) 
+eng_per1 = 0.2036 # $/kWh
+eng_per2 = 0.1094 # $/kWh
+eng_per3 = 0.1404 # $/kWh
+eng_per4 = 0.1197 # $/kWh
+eng_adjs = 0.0016 # $/kWh -- same for all periods and tiers
+year = 2018
+size = "Sm"
+getSMUDEnergyTOU()
+
+# Large Ag (2018) 
+eng_per1 = 0.2164 # $/kWh
+eng_per2 = 0.1153 # $/kWh
+eng_per3 = 0.1398 # $/kWh
+eng_per4 = 0.1187 # $/kWh
+eng_adjs = 0.0016 # $/kWh -- same for all periods and tiers
+year = 2018
+size = "Lg"
+getSMUDEnergyTOU()
+```
+
+# Missing SMUD Years
+```{r}
+# For missing years (currently 2008, 2009, 2012), use bundled system average rates to estimate missing data -- only following years for reference
+getMissingYrs_SMUD = function(ref_yr, missing_yr){
+  # Get SMUD dfs for nearest reference year
+  SmAg_serv <- read.csv(paste(outdir, "SMUD/", "SmAg_serv_", ref_yr, ".csv", sep=""), header=FALSE)
+  SmAg_energy <- read.csv(paste(outdir, "SMUD/", "SmAg_energy_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_serv <- read.csv(paste(outdir, "SMUD/", "LgAg_serv_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_energy <- read.csv(paste(outdir, "SMUD/", "LgAg_energy_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_energy_add <- read.csv(paste(outdir, "SMUD/", "LgAg_energy_add_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_facil <- read.csv(paste(outdir, "SMUD/", "LgAg_facil_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_facil_add <- read.csv(paste(outdir, "SMUD/", "LgAg_facil_add_", ref_yr, ".csv", sep=""), header=FALSE)
+  
+  # Get multiplier for reference year from bundled SAR for PG&E (because not SCE)
+  yr_list <- c(2008:2018)
+  yr_list <- yr_list[which(yr_list <= ref_yr & yr_list > missing_yr)]
+  bun_SAR_multiplier <- bun_SAR$PGE[which(bun_SAR$Year %in% yr_list)] %>% prod() # multiplicative product of rate of change
+  
+  # Adjust dataframes by multiplier -- divided because we are using later years to reference for earlier years (backwards rate of change)
+  SmAg_serv <- SmAg_serv / bun_SAR_multiplier
+  SmAg_energy <-SmAg_energy / bun_SAR_multiplier
+  LgAg_serv <- LgAg_serv / bun_SAR_multiplier
+  LgAg_energy <- LgAg_energy / bun_SAR_multiplier
+  LgAg_energy_add <- LgAg_energy_add / bun_SAR_multiplier
+  LgAg_facil <- LgAg_facil / bun_SAR_multiplier
+  LgAg_facil_add <- LgAg_facil_add / bun_SAR_multiplier
+  
+  # Export new dfs
+  write_csv(SmAg_serv, paste(outdir, "SMUD/", "SmAg_serv_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(SmAg_energy, paste(outdir, "SMUD/", "SmAg_energy_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_serv, paste(outdir, "SMUD/", "LgAg_serv_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_energy, paste(outdir, "SMUD/", "LgAg_energy_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_energy_add, paste(outdir, "SMUD/", "LgAg_energy_add_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_facil, paste(outdir, "SMUD/", "LgAg_facil_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_facil_add, paste(outdir, "SMUD/", "LgAg_facil_add_", missing_yr, ".csv", sep=""), col_names = FALSE)
+}
+
+# Run missing year function for missing years (2008, 2009, 2012) using closest following year as reference
+getMissingYrs_SMUD(ref_yr = 2010, missing_yr = 2008)
+getMissingYrs_SMUD(ref_yr = 2010, missing_yr = 2009)
+getMissingYrs_SMUD(ref_yr = 2013, missing_yr = 2012)
+```
+
+
+
+# ~~~~~~~~~~~~~~~~~~~ #
+#         SCE         #
+# ~~~~~~~~~~~~~~~~~~~ #
+
+# SCE Years with Reports (or projections) -- Functions
+```{r}
+## NOTES: 
+# For both SCE TOU-PA2 and TOU-PA3, reports contain multiple On-Peak and Mid-Peak rates for each effective date. This is due to one rate-page including 
+# time-related voltage charges into UG energy charges, while the other separates these charges out. Since this is the true and more straightforward 
+# rate, we selected the larger reported-rate that includes these charges. These rates are always on latter pages in the report. Right before the 
+# special conditions. Additionally, Holiday rate changes were ignored (minimal days in year where off-peak takes over on weekdays)
+
+# Get weekday and weekend indices
+yearDOY <- c(1:365)
+weekend <- c(yearDOY[seq(6, length(yearDOY), 7)], yearDOY[seq(7, length(yearDOY), 7)]) %>% sort()
+weekday <- yearDOY[which(!yearDOY %in% weekend)]
+totd = 365
+
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+## Functions to Implement and Export Annual Rates ## 
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+
+# Empty df to append
+df_period_save = data.frame(DOY_eff = numeric(), customer_chrge_s = numeric(), demand_chrge_s = numeric(), customer_chrge_w = numeric(), demand_chrge_w = numeric(), 
+                            energy_On_Peak_deliv_s = numeric(), energy_MidPeak_deliv_s = numeric(), energy_OffPeak_deliv_s = numeric(), energy_On_Peak_genUG_s = numeric(), 
+                            energy_MidPeak_genUG_s = numeric(), energy_OffPeak_genUG_s = numeric(), energy_On_Peak_deliv_w = numeric(), energy_MidPeak_deliv_w = numeric(),
+                            energy_OffPeak_deliv_w = numeric(), energy_On_Peak_genUG_w = numeric(), energy_MidPeak_genUG_w = numeric(), energy_OffPeak_genUG_w = numeric())
+
+
+# Function to append df
+get_Period = function(){
+  # Get summer and winter rates for customer and service charges (copy since there is no difference)
+  DOY_eff = DOY_eff
+  energy_On_Peak_deliv_s = energy_On_Peak_deliv_s
+  energy_MidPeak_deliv_s = energy_MidPeak_deliv_s
+  energy_OffPeak_deliv_s = energy_OffPeak_deliv_s
+  energy_On_Peak_genUG_s = energy_On_Peak_genUG_s
+  energy_MidPeak_genUG_s = energy_MidPeak_genUG_s
+  energy_OffPeak_genUG_s = energy_OffPeak_genUG_s
+  energy_On_Peak_deliv_w = energy_On_Peak_deliv_w
+  energy_MidPeak_deliv_w = energy_MidPeak_deliv_w
+  energy_OffPeak_deliv_w = energy_OffPeak_deliv_w
+  energy_On_Peak_genUG_w = energy_On_Peak_genUG_w
+  energy_MidPeak_genUG_w = energy_MidPeak_genUG_w
+  energy_OffPeak_genUG_w = energy_OffPeak_genUG_w
+  # Get summer and winter rates for customer and service charges (copy since there is no difference)
+  demand_chrge_s = demand_chrge
+  demand_chrge_w = demand_chrge
+  customer_chrge_s = customer_chrge
+  customer_chrge_w = customer_chrge
+  # Generate dataframe
+  df_period_temp <- data.frame(DOY_eff = DOY_eff , customer_chrge_s = customer_chrge_s, customer_chrge_w = customer_chrge_w, demand_chrge_s = demand_chrge_s, demand_chrge_w = demand_chrge_w, 
+                               energy_On_Peak_deliv_s = energy_On_Peak_deliv_s, energy_MidPeak_deliv_s = energy_MidPeak_deliv_s, energy_OffPeak_deliv_s = energy_OffPeak_deliv_s, 
+                               energy_On_Peak_genUG_s = energy_On_Peak_genUG_s, energy_MidPeak_genUG_s = energy_MidPeak_genUG_s, energy_OffPeak_genUG_s = energy_OffPeak_genUG_s, 
+                               energy_On_Peak_deliv_w = energy_On_Peak_deliv_w, energy_MidPeak_deliv_w = energy_MidPeak_deliv_w, energy_OffPeak_deliv_w = energy_OffPeak_deliv_w, 
+                               energy_On_Peak_genUG_w = energy_On_Peak_genUG_w, energy_MidPeak_genUG_w = energy_MidPeak_genUG_w, energy_OffPeak_genUG_w = energy_OffPeak_genUG_w)
+  df_period = rbind(df_period, df_period_temp)
+  return(df_period)
+}
+
+# Run function
+getSCE <- function(PA_size){
+  # Season Variables ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 17 -- 2013 Report (unreported thereafter) -- For both PA2 and PA3
+  sumDOY = 152
+  winDOY = 274
+  summer = c(sumDOY:(winDOY-1))
+  winter = c(1:(sumDOY-1), winDOY:totd)
+  # TOU Time Variables ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 17 -- 2013 Report (unreported thereafter) -- For both PA2 and PA3
+  hour_list <- c(1:24)
+  onn_peak_s = c(12:17) # summer weekdays ONLY except holidays -- 12pm to 6pm (through 5pm)
+  onn_peak_w = c() # none
+  mid_peak_s = c(8:11, 18:22) # summer weekdays ONLY except holidays
+  mid_peak_w = c(8:20) # winter weekdays  -- 8am to 9pm (through 8pm)
+  off_peak_s = hour_list[which(!hour_list %in% onn_peak_s & !hour_list %in% mid_peak_s)] # Everything else (weekdays)
+  off_peak_w = hour_list[which(!hour_list %in% onn_peak_w & !hour_list %in% mid_peak_w)] # Everything else (weekdays)
+  # Order df_year by effective date 
+  df_year <- df_period
+  df_year <- df_year[order(df_year$DOY_eff), ]
+  # If first effective date is not Jan1, assume first effective rate extends back to Jan1 (first date should always be Jan1)
+  df_year[1, ]$DOY_eff <- 1
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ TOU Rates (For SCE, Energy Deliverty and UG charge)
+  
+  # Create Small and Large Ag rate for year of interest (Delivery and UG Charges)
+  fill_rateDF_TOU <- function(charge){
+    # Get df for each season
+    df_out_s <- df
+    df_out_w <- df
+    # For each rate change, fill df based on DOY and season
+    for(i in c(1:nrow(df_year))){
+      # Get effective date rate
+      eff <- df_year[i,]$DOY_eff
+      end <- ifelse(i == nrow(df_year), totd, (df_year[i+1,]$DOY_eff)-1) # Minus 1 is to account for following effective date
+      eff_range = c(eff:end)
+      # Function to get hour vector 
+      getSeason_HourRateVector <- function(season, day_delin){
+        # Select times scedules for season
+        if(season == "s"){
+          onn_peak = onn_peak_s
+          mid_peak = mid_peak_s
+          off_peak = off_peak_s
+        } else {
+          onn_peak = onn_peak_w
+          mid_peak = mid_peak_w
+          off_peak = off_peak_w
+        }
+        # Get hourly vector
+        hour_list_temp <- rep(0, 24)
+        if(day_delin == "weekday"){
+          # Weekdays are split into on peak, off peak, and mid peak rates
+          hour_list_temp[onn_peak] <- df_year[i, paste("energy_On_Peak_", charge, "_", season, sep="")]
+          hour_list_temp[mid_peak] <- df_year[i, paste("energy_MidPeak_", charge, "_", season, sep="")]
+          hour_list_temp[off_peak] <- df_year[i, paste("energy_OffPeak_", charge, "_", season, sep="")]
+        } else {
+          # For weekends, every hour is offpeak
+          hour_list_temp[c(1:length(hour_list_temp))] <- df_year[i, paste("energy_OffPeak_", charge, "_", season, sep="")]
+        }
+        # Treturn vector
+        return(hour_list_temp)
+      }
+      # For effective date range, fill summer and winter dataframes by time schedule and weekend/weekday delination
+      df_out_s[,c(eff_range[which(eff_range %in% weekday)])] <- getSeason_HourRateVector('s', 'weekday') # summer weekdays
+      df_out_w[,c(eff_range[which(eff_range %in% weekday)])] <- getSeason_HourRateVector('w', 'weekday') # summer weekdays
+      df_out_s[,c(eff_range[which(eff_range %in% weekend)])] <- getSeason_HourRateVector('s', 'weekend') # summer weekends
+      df_out_w[,c(eff_range[which(eff_range %in% weekend)])] <- getSeason_HourRateVector('w', 'weekend') # summer weekends
+    }
+    # Merge winter and summer df based on season
+    df_out = df
+    df_out[, summer] <- df_out_s[, summer]
+    df_out[, winter] <- df_out_w[, winter]
+    # Save out df
+    size = ifelse(PA_size=="PA3", "Lg", "Sm")
+    write_csv(df_out, paste(outdir, "SCE/", size, "Ag_", charge, "_", PA_size, "_", year, ".csv", sep=""), col_names = FALSE)
+  }
+  # Run function for delivery and genUG charges
+  fill_rateDF_TOU('deliv')
+  fill_rateDF_TOU('genUG')
+  
+  # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Non-TOU Rates (For SCE, Demand and Customer charge)
+  
+  # Function to export customer charge and demand charge (non-TOU or season dependent)
+  fill_rateDF <- function(charge){
+    # Get df for each season
+    df_out_s <- df
+    df_out_w <- df
+    # For each rate change, fill df based on DOY and season
+    for(i in c(1:nrow(df_year))){
+      # Fill summer and winter dfs from start of year to end rate change
+      eff <- df_year[i,]$DOY_eff
+      end <- ifelse(i == nrow(df_year), totd, (df_year[i+1,]$DOY_eff)-1) # Minus 1 is to account for following effective date
+      eff_range = c(eff:end)
+      df_out_s[,eff_range] <- rep(df_year[i, paste(charge, "_chrge_s", sep="")], 24)
+      df_out_w[,eff_range] <- rep(df_year[i, paste(charge, "_chrge_w", sep="")], 24)
+    }
+    # Merge winter and summer df based on season
+    df_out = df
+    df_out[, summer] <- df_out_s[, summer]
+    df_out[, winter] <- df_out_w[, winter]
+    # Save out df
+    size = ifelse(PA_size=="PA3", "Lg", "Sm")
+    write_csv(df_out, paste(outdir, "SCE/", size, "Ag_", charge, "_", PA_size, "_", year, ".csv", sep=""), col_names = FALSE)
+  }
+  # Run function for non-tou charges
+  fill_rateDF('demand')
+  fill_rateDF('customer')
+}
+```
+
+# SCE Years with Reports (or projections) -- PA3
+```{r}
+## ~~~~~~~~~~ ##
+## 2013 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2013
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2013
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 13
+# Fixed Rates
+customer_chrge <- 194.82 # $/Meter/Month
+demand_chrge <- 8.29 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02379 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- 0.02379 # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- 0.02379 # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.25055 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07489 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03144 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- 0.02379 # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- 0.02379 # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05398 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03662  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 326
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 14
+# Fixed Rates
+customer_chrge <- 188.25 # $/Meter/Month
+demand_chrge <- 8.08 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02168 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- 0.02168 # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- 0.02168 # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.24585 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07350 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03088 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- 0.02168 # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- 0.02168 # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05300 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03597  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 15
+# Fixed Rates
+customer_chrge <- 188.25 # $/Meter/Month
+demand_chrge <- 8.36 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02176 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- 0.02176 # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- 0.02176 # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.24585 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07350 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03088 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- 0.02176 # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- 0.02176 # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05300 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03597  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 16
+# Fixed Rates
+customer_chrge <- 188.25 # $/Meter/Month
+demand_chrge <- 8.37 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02101 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- 0.02101 # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- 0.02101 # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.24747 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07400 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03107 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- 0.02101 # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- 0.02101 # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05334 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03619  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 91
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA3")
+
+  
+## ~~~~~~~~~~ ##
+## 2014 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2014
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2014
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 16
+# Fixed Rates
+customer_chrge <- 193.26 # $/Meter/Month
+demand_chrge <- 7.86 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02701 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.30855 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09164 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03802 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06587 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04441  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 223
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 17
+# Fixed Rates
+customer_chrge <- 193.26 # $/Meter/Month
+demand_chrge <- 7.86 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02622 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.31062 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09224 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03827 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06630 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04470  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 18
+# Fixed Rates
+customer_chrge <- 198.99 # $/Meter/Month
+demand_chrge <- 8.04 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02405 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.27063 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08040 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03338 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05779 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03898  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 91
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 19
+# Fixed Rates
+customer_chrge <- 198.99 # $/Meter/Month
+demand_chrge <- 8.04 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02405 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.24618 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07317 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03039 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05259 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03549  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA3")
+
+  
+## ~~~~~~~~~~ ##
+## 2015 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2015
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2015
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 17
+# Fixed Rates
+customer_chrge <- 197.69 # $/Meter/Month
+demand_chrge <- 8.19 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02803 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.27255 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08190 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03481 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05928 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04043  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 328
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 18
+# Fixed Rates
+customer_chrge <- 197.69 # $/Meter/Month
+demand_chrge <- 8.19 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02813 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.28102 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08444 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03585 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06109 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04164  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 19
+# Fixed Rates
+customer_chrge <- 197.69 # $/Meter/Month
+demand_chrge <- 8.19 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02810 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.28102 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08444 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03585 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06109 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04164  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 20
+# Fixed Rates
+customer_chrge <- 197.69 # $/Meter/Month
+demand_chrge <- 8.19 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02765 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.28102 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08444 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03585 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06109 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04164  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 61
+df_period <- get_Period()
+
+## Period 5 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 21
+# Fixed Rates
+customer_chrge <- 197.69 # $/Meter/Month
+demand_chrge <- 8.19 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02766 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.28568 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08582 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03641 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06207 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04230 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA3")
+
+  
+## ~~~~~~~~~~ ##
+## 2016 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2016
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2016
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 12
+# Fixed Rates
+customer_chrge <- 212.63 # $/Meter/Month
+demand_chrge <- 11.27 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02249 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.20902 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.05739 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.02812 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04051 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03231 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 13
+# Fixed Rates
+customer_chrge <- 212.63 # $/Meter/Month
+demand_chrge <- 11.27 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02193 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.20902 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.05739 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.02812 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04051 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03231 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 14
+# Fixed Rates
+customer_chrge <- 220.67 # $/Meter/Month
+demand_chrge <- 9.77 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02492 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.20266 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06017 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.02496 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04325 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.02916 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA3")
+
+  
+## ~~~~~~~~~~ ##
+## 2017 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2017
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2017
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 11
+# Fixed Rates
+customer_chrge <- 209.41 # $/Meter/Month
+demand_chrge <- 11.28 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02348 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.22516 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06169 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03010 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04346 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03462 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 12
+# Fixed Rates
+customer_chrge <- 209.41 # $/Meter/Month
+demand_chrge <- 11.28 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02406 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.22516 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06169 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03010 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04346 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03462 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 13
+# Fixed Rates
+customer_chrge <- 209.41 # $/Meter/Month
+demand_chrge <- 11.28 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02496 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.22516 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06169 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03010 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04346 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03462 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA3")
+
+  
+## ~~~~~~~~~~ ##
+## 2018 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2018
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2018
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 18
+# Fixed Rates
+customer_chrge <- 217.03 # $/Meter/Month
+demand_chrge <- 11.56 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02126 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.25494 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06979 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03409 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04922 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03921 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 19
+# Fixed Rates
+customer_chrge <- 217.03 # $/Meter/Month
+demand_chrge <- 11.56 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02129 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.25857 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07084 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03457 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04992 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03977 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 258
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 20
+# Fixed Rates
+customer_chrge <- 217.03 # $/Meter/Month
+demand_chrge <- 11.56 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02103 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.19568 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.05357 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.02616 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.03777 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03009 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 239
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 21
+# Fixed Rates
+customer_chrge <- 217.03 # $/Meter/Month
+demand_chrge <- 11.56 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02129 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.25857 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07084 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03457 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04992 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03977 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 5 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 22
+# Fixed Rates
+customer_chrge <- 217.03 # $/Meter/Month
+demand_chrge <- 11.56 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02060 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.25857 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07084 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03457 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04992 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03977 # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA3")
+```
+
+# SCE Years with Reports (or projections) -- PA2
+```{r}
+# Notes
+# SCE TOU-PA2 reports have the same repeated effective date with differenting generation amounts thorughout the report, 
+# but the larger summer peak and mid rates (thaat include time-dependent voltage chages) are in the beginning of the PA2
+# reports rather than the end (PA3)
+
+## ~~~~~~~~~~ ##
+## 2013 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2013
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2013
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 2
+# Fixed Rates
+customer_chrge <- 40.88 # $/Meter/Month
+demand_chrge <- 8.11 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02119 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.32478 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09822 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03727 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06735 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04338  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 326
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 3
+# Fixed Rates
+customer_chrge <- 39.50 # $/Meter/Month
+demand_chrge <- 7.87 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02028 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.31871 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09639 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03660 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06610 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04259  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 4
+# Fixed Rates
+customer_chrge <- 39.50 # $/Meter/Month
+demand_chrge <- 8.00 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02036 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.31871 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09639 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03660 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06610 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04259  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 5
+# Fixed Rates
+customer_chrge <- 39.50 # $/Meter/Month
+demand_chrge <- 8.01 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.01962 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.31901 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09645 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03664 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06617 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04263  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 91
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA2")
+
+## ~~~~~~~~~~ ##
+## 2014 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2014
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2014
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 3
+# Fixed Rates
+customer_chrge <- 40.56 # $/Meter/Month
+demand_chrge <- 8.34 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02318 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.39796 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.11970 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04496 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.08189 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.05246  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 326
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 4
+# Fixed Rates
+customer_chrge <- 40.56 # $/Meter/Month
+demand_chrge <- 8.34 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02318 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.39796 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.11970 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04496 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.08189 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.05246  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 223
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 5
+# Fixed Rates
+customer_chrge <- 40.56 # $/Meter/Month
+demand_chrge <- 8.34 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02308 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.40049 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.12054 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04525 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.08242 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.05280  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 188
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 6
+# Fixed Rates
+customer_chrge <- 40.56 # $/Meter/Month
+demand_chrge <- 8.34 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02244 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.40049 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.12054 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04525 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.08242 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.05280  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 5 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 7
+# Fixed Rates
+customer_chrge <- 41.76 # $/Meter/Month
+demand_chrge <- 8.55 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02130 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.35096 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.10570 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03970 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.07228 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04632  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 91
+df_period <- get_Period()
+
+## Period 6 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 8
+# Fixed Rates
+customer_chrge <- 41.76 # $/Meter/Month
+demand_chrge <- 8.55 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02130 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.31927 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.09615 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03614 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.06577 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04216  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA2")
+
+## ~~~~~~~~~~ ##
+## 2015 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2015
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2015
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 2
+# Fixed Rates
+customer_chrge <- 41.49 # $/Meter/Month
+demand_chrge <- 8.91 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02414 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.35084 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.10638 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04087 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.07330 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04747  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 328
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 3
+# Fixed Rates
+customer_chrge <- 41.49 # $/Meter/Month
+demand_chrge <- 8.91 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02424 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.36187 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.10974 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04211 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.07557 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04891  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 4
+# Fixed Rates
+customer_chrge <- 41.49 # $/Meter/Month
+demand_chrge <- 8.91 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02424 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.36187 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.10974 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04211 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.07557 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04891  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 5
+# Fixed Rates
+customer_chrge <- 41.49 # $/Meter/Month
+demand_chrge <- 8.91 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02376 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.36187 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.10974 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04211 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.07557 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04891  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 61
+df_period <- get_Period()
+
+## Period 5 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 6
+# Fixed Rates
+customer_chrge <- 41.49 # $/Meter/Month
+demand_chrge <- 8.91 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02377 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.36789 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.11155 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.04278 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.07679 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04969  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA2")
+
+## ~~~~~~~~~~ ##
+## 2016 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2016
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2016
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 2
+# Fixed Rates
+customer_chrge <- 42.25 # $/Meter/Month
+demand_chrge <- 11.07 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02099 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.27011 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06887 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03004 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04333 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03453  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 3
+# Fixed Rates
+customer_chrge <- 42.25 # $/Meter/Month
+demand_chrge <- 11.07 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02043 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.27011 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06887 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03004 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04333 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03453  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 4
+# Fixed Rates
+customer_chrge <- 46.32 # $/Meter/Month
+demand_chrge <- 10.28 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02277 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.26068 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07828 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.02943 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05362 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03434  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA2")
+
+## ~~~~~~~~~~ ##
+## 2017 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2017
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2017
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 2
+# Fixed Rates
+customer_chrge <- 41.63 # $/Meter/Month
+demand_chrge <- 11.26 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02223 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.29299 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07450 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03238 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04681 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03725  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 3
+# Fixed Rates
+customer_chrge <- 41.63 # $/Meter/Month
+demand_chrge <- 11.26 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02281 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.29299 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07450 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03238 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04681 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03725  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 4
+# Fixed Rates
+customer_chrge <- 41.63 # $/Meter/Month
+demand_chrge <- 11.26 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.02371 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.29299 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.07450 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03238 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04681 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03725  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA2")
+
+## ~~~~~~~~~~ ##
+## 2018 rates ## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ 2018
+## ~~~~~~~~~~ ##
+
+# Set year & dataframe
+year = 2018
+df_period = df_period_save
+
+## Period 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 1
+# Fixed Rates
+customer_chrge <- 43.15 # $/Meter/Month
+demand_chrge <- 11.47 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.01954 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.33179 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08444 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03667 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05302 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04219  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 274
+df_period <- get_Period()
+
+## Period 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 2
+# Fixed Rates
+customer_chrge <- 43.15 # $/Meter/Month
+demand_chrge <- 11.47 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.01957 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.33646 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08563 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03719 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05377 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04279  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 258
+df_period <- get_Period()
+
+## Period 3 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 3
+# Fixed Rates
+customer_chrge <- 43.15 # $/Meter/Month
+demand_chrge <- 11.47 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.01931 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.25457 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.06477 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.02814 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.04069 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.03238  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 239
+df_period <- get_Period()
+
+## Period 4 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 4
+# Fixed Rates
+customer_chrge <- 43.15 # $/Meter/Month
+demand_chrge <- 11.47 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.01957 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.33646 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08563 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03719 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05377 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04279  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 152
+df_period <- get_Period()
+
+## Period 5 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pg 5
+# Fixed Rates
+customer_chrge <- 43.15 # $/Meter/Month
+demand_chrge <- 11.47 # $/kWW of Billing Demand/Meter/Month
+# TOU Rates
+energy_On_Peak_deliv_s <- 0.01888 # $/kWh/Meter/Month
+energy_MidPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_s <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_s <- 0.33646 # $/kWh/Meter/Month
+energy_MidPeak_genUG_s <- 0.08563 # $/kWh/Meter/Month
+energy_OffPeak_genUG_s <- 0.03719 # $/kWh/Meter/Month
+energy_On_Peak_deliv_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_OffPeak_deliv_w <- energy_On_Peak_deliv_s # $/kWh/Meter/Month
+energy_On_Peak_genUG_w <- NA # $/kWh/Meter/Month
+energy_MidPeak_genUG_w <- 0.05377 # $/kWh/Meter/Month
+energy_OffPeak_genUG_w <- 0.04279  # $/kWh/Meter/Month
+# Rate Effective day
+DOY_eff <- 1
+df_period <- get_Period()
+
+# Fill and export dataframes for given year
+getSCE("PA2")
+```
+
+# Missing SCE Years (PA2 & PA3)
+```{r}
+# For missing years (currently 2008, 2009, 2012), use bundled system average rates to estimate missing data -- only following years for reference
+getMissingYrs_SCE = function(ref_yr, missing_yr){
+  # Get SMUD dfs for nearest reference year
+  SmAg_serv <- read.csv(paste(outdir, "SCE/", "SmAg_demand_PA2_", ref_yr, ".csv", sep=""), header=FALSE)
+  SmAg_energyDeliv <- read.csv(paste(outdir, "SCE/", "SmAg_deliv_PA2_", ref_yr, ".csv", sep=""), header=FALSE)
+  SmAg_energyGenUG <- read.csv(paste(outdir, "SCE/", "SmAg_genUG_PA2_", ref_yr, ".csv", sep=""), header=FALSE)
+  SmAg_customer <- read.csv(paste(outdir, "SCE/", "SmAg_customer_PA2_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_serv <- read.csv(paste(outdir, "SCE/", "LgAg_demand_PA3_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_energyDeliv <- read.csv(paste(outdir, "SCE/", "LgAg_deliv_PA3_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_energyGenUG <- read.csv(paste(outdir, "SCE/", "LgAg_genUG_PA3_", ref_yr, ".csv", sep=""), header=FALSE)
+  LgAg_customer <- read.csv(paste(outdir, "SCE/", "LgAg_customer_PA3_", ref_yr, ".csv", sep=""), header=FALSE)
+  
+  # Get multiplier for reference year from bundled SAR for SCE
+  yr_list <- c(2008:2018)
+  yr_list <- yr_list[which(yr_list <= ref_yr & yr_list > missing_yr)]
+  bun_SAR_multiplier <- bun_SAR$SCE[which(bun_SAR$Year %in% yr_list)] %>% prod() # multiplicative product of rate of change
+  
+  # Adjust dataframes by multiplier -- divided because we are using later years to reference for earlier years (backwards rate of change)
+  SmAg_serv <- SmAg_serv / bun_SAR_multiplier
+  SmAg_energyDeliv <- SmAg_energyDeliv / bun_SAR_multiplier
+  SmAg_energyGenUG <- SmAg_energyGenUG / bun_SAR_multiplier
+  SmAg_customer <- SmAg_customer / bun_SAR_multiplier
+  LgAg_serv <- LgAg_serv / bun_SAR_multiplier
+  LgAg_energyDeliv <- LgAg_energyDeliv / bun_SAR_multiplier
+  LgAg_energyGenUG <- LgAg_energyGenUG / bun_SAR_multiplier
+  LgAg_customer <- LgAg_customer / bun_SAR_multiplier
+  
+  # Export new dfs
+  write_csv(SmAg_serv, paste(outdir, "SCE/", "SmAg_demand_PA2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(SmAg_energyDeliv, paste(outdir, "SCE/", "SmAg_deliv_PA2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(SmAg_energyGenUG, paste(outdir, "SCE/", "SmAg_genUG_PA2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(SmAg_customer, paste(outdir, "SCE/", "SmAg_customer_PA2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_serv, paste(outdir, "SCE/", "LgAg_demand_PA3_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_energyDeliv, paste(outdir, "SCE/", "LgAg_deliv_PA3_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_energyGenUG, paste(outdir, "SCE/", "LgAg_genUG_PA3_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(LgAg_customer, paste(outdir, "SCE/", "LgAg_customer_PA3_", missing_yr, ".csv", sep=""), col_names = FALSE)
+}
+
+# Run missing year function for missing years (2008, 2009, 2012) using closest following year as reference
+getMissingYrs_SCE(ref_yr = 2013, missing_yr = 2008)
+getMissingYrs_SCE(ref_yr = 2013, missing_yr = 2009)
+getMissingYrs_SCE(ref_yr = 2013, missing_yr = 2010)
+getMissingYrs_SCE(ref_yr = 2013, missing_yr = 2011)
+getMissingYrs_SCE(ref_yr = 2013, missing_yr = 2012)
+```
+
+
+
+# ~~~~~~~~~~~~~~~~~~~ #
+#        PG&E         #
+# ~~~~~~~~~~~~~~~~~~~ #
+
+# PG&E Years with Reports (or projections)
+```{r}
+# This whole process assumes that reports are excel files organized in the same way as the examples in 'Data/Downloaded/UtilityRate_Reports/Pacific gas and electric company'. 
+# All files have to named as "LgAg_Jan1_Feb28.xls" and so on, and all leap years must be corrected from "Feb29" to "Feb28"
+
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+## Generate Dataframe from Excel File  ## -- For each year, gets all rates from year filder into a single df
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+# Funciton to pull data from excel file and directly export for PG&E (works because they keep their data in xls not pdf
+getPGE_agRateYr = function(year, fileName, DOY_eff){
+  # ~~~~~ #
+  # Large ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # ~~~~~ #
+  # Call in large dataframe from xls file
+  df_temp <- read_excel(paste('Data/Downloaded/UtilityRate_Reports/Pacific gas and electric company/', year, '/LgAg_', fileName, '.xls', sep=""))
+  # Fill rate schedule column (NA because merged cells in excel)
+  for(i in c(1:nrow(df_temp))){
+    df_temp[i, ]$`Rate Schedule` <- ifelse(is.na(df_temp[i, ]$`Rate Schedule`), df_temp[i-1, ]$`Rate Schedule`, df_temp[i, ]$`Rate Schedule`)
+    df_temp[i, ]$`Customer Charge` <- ifelse(is.na(df_temp[i, ]$`Customer Charge`), df_temp[i-1, ]$`Customer Charge`, df_temp[i, ]$`Customer Charge`) }
+  # Select agricultural rates for Large (1B) or small (1A) systems
+  df_temp <- df_temp[which(df_temp$`Rate Schedule`=="AG-1B" | df_temp$`Rate Schedule`=="AG-1A"), ]
+  df_temp$`Customer Charge` <- sub("\\/.*", "", df_temp$`Customer Charge`) %>% as.character()
+  df_temp$`Customer Charge` <- parse_number(df_temp$`Customer Charge`)
+  # Large Ag Service
+  demand_large_s = df_temp[which(df_temp$Season=="Summer"), ][, grepl('Demand Charge', names(df_temp))] %>% as.numeric() # ($/kW)
+  demand_large_w = df_temp[which(df_temp$Season=="Winter"), ][, grepl('Demand Charge', names(df_temp))] %>% as.numeric() # ($/kW)
+  energy_large_s = df_temp[which(df_temp$Season=="Summer"), ][, grepl('Energy Charge', names(df_temp))] %>% as.numeric() # ($/kWh)
+  energy_large_w = df_temp[which(df_temp$Season=="Winter"), ][, grepl('Energy Charge', names(df_temp))] %>% as.numeric() # ($/kWh)
+  custChrge_large_s = df_temp[which(df_temp$Season=="Summer"), ][, grepl('Customer Charge', names(df_temp))] %>% as.numeric() # ($/day)
+  custChrge_large_w = df_temp[which(df_temp$Season=="Winter"), ][, grepl('Customer Charge', names(df_temp))] %>% as.numeric() # ($/day)
+  
+  # ~~~~~ #
+  # Small ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  # ~~~~~ #
+  # Call in large dataframe from xls file
+  df_temp <- read_excel(paste('Data/Downloaded/UtilityRate_Reports/Pacific gas and electric company/', year, '/SmAg_', fileName, '.xls', sep=""))
+  # Fill rate schedule column (NA because merged cells in excel)
+  for(i in c(1:nrow(df_temp))){
+    df_temp[i, ]$`Rate Schedule` <- ifelse(is.na(df_temp[i, ]$`Rate Schedule`), df_temp[i-1, ]$`Rate Schedule`, df_temp[i, ]$`Rate Schedule`)
+    df_temp[i, ]$`Customer Charge` <- ifelse(is.na(df_temp[i, ]$`Customer Charge`), df_temp[i-1, ]$`Customer Charge`, df_temp[i, ]$`Customer Charge`) }
+  # Select agricultural rates for Large (1B) or small (1A) systems
+  df_temp <- df_temp[which(df_temp$`Rate Schedule`=="AG-1B" | df_temp$`Rate Schedule`=="AG-1A"), ]
+  df_temp$`Customer Charge` <- sub("\\/.*", "", df_temp$`Customer Charge`) %>% as.character()
+  df_temp$`Customer Charge` <- parse_number(df_temp$`Customer Charge`)
+  # Small Ag Service
+  demand_small_s = df_temp[which(df_temp$Season=="Summer"), ][, grepl('Demand Charge', names(df_temp))] %>% as.numeric() # ($/kW)
+  demand_small_w = df_temp[which(df_temp$Season=="Winter"), ][, grepl('Demand Charge', names(df_temp))] %>% as.numeric() # ($/kW)
+  energy_small_s = df_temp[which(df_temp$Season=="Summer"), ][, grepl('Energy Charge', names(df_temp))] %>% as.numeric() # ($/kWh)
+  energy_small_w = df_temp[which(df_temp$Season=="Winter"), ][, grepl('Energy Charge', names(df_temp))] %>% as.numeric() # ($/kWh)
+  custChrge_small_s = df_temp[which(df_temp$Season=="Summer"), ][, grepl('Customer Charge', names(df_temp))] %>% as.numeric() # ($/day)
+  custChrge_small_w = df_temp[which(df_temp$Season=="Winter"), ][, grepl('Customer Charge', names(df_temp))] %>% as.numeric() # ($/day)
+  
+  # Generate dataframe to export
+  out_df <- data.frame(dem_l_s = demand_large_s, dem_l_w = demand_large_w, dem_s_s = demand_small_s, dem_s_w = demand_small_w,
+                       eng_l_s = energy_large_s, eng_l_w = energy_large_w, eng_s_s = energy_small_s, eng_s_w = energy_small_w, 
+                       cus_l_s = custChrge_large_s, cus_l_w = custChrge_large_w, cus_s_s = custChrge_small_s, cus_s_w = custChrge_small_w,
+                       DOY_eff = DOY_eff, Year = year)
+  return(out_df)
+}
+
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+## Fill 24x365 dataframes with rates   ## -- For each year, fills daily rate dataframe based on effective dates and summer vs winter rates
+## ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ##
+
+## ~~~~~~~~~~ ##
+# Run function over dfs for every year and export accordingly -- Only works if files are named systematically as LgAg_Jan1_Feb29.xls
+getPGE = function(year){
+ # Call in CSVs post gee
+  file_list <- list.files(paste('Data/Downloaded/UtilityRate_Reports/Pacific gas and electric company/', year, sep = ""), 
+                          pattern = "\\.xls$", full.names = FALSE)
+  # Remove size specification and file extensio
+  file_list <- sub("\\..*", "", file_list)
+  file_list <- sub(".*Ag_", "", file_list)
+  file_list <- file_list %>% unique()
+  
+  # Create dataframe to fill for every year
+  df_year = data.frame(dem_l_s = numeric(), dem_l_w = numeric(), dem_s_s = numeric(), dem_s_w = numeric(),
+                       eng_l_s = numeric(), eng_l_w = numeric(), eng_s_s = numeric(), eng_s_w = numeric(), 
+                       cus_l_s = numeric(), cus_l_w = numeric(), cus_s_s = numeric(), cus_s_w = numeric(),
+                       DOY_eff = integer(), Year = integer())
+  # For every unique file date, get small and large rates
+  for(fileName in file_list){
+    # Get DOY from file name
+    DOY_eff <- sub("\\_.*", "", fileName) %>% paste('/2023', sep="") # Arbitrary year, not used, just needs to not be leap year
+    # Turn into date
+    DOY_eff <- as.Date(DOY_eff, '%b%d/%Y') %>% yday()
+    # Run fuction for each rate change period
+    df_temp <- getPGE_agRateYr(year = year, fileName = fileName, DOY_eff = DOY_eff)
+    df_year <- rbind(df_year, df_temp)
+  }
+  
+  # Order df_year by effective date 
+  df_year <- df_year[order(df_year$DOY_eff), ]
+  
+  # Create Small and Large Ag rate for year of interest ~~~~~~~~~~~~~~~~
+  fill_rateDF <- function(charge){
+    # Get df for each season
+    df_out_s <- df
+    df_out_w <- df
+    # Get size
+    size = ifelse(grepl("_s", charge), "Sm", "Lg")
+    # Set summer and winter DOY (winter is any DOY not in summer)
+    sumDOY = 121
+    winDOY = 305
+    totd = 365
+    summer = c(sumDOY:(winDOY-1))
+    winter = c(1:(sumDOY-1), winDOY:totd)
+    # For each rate change, fill df based on DOY and season
+    for(i in c(1:nrow(df_year))){
+      # Fill summer and winter dfs from start of year to end rate change
+      eff <- df_year[i,]$DOY_eff
+      end <- ifelse(i == nrow(df_year), totd, (df_year[i+1,]$DOY_eff)-1) # Minus 1 is to account for following effective date
+      df_out_s[,c(eff:end)] <- rep(df_year[i, paste(charge, "_s", sep="")], 24)
+      df_out_w[,c(eff:end)] <- rep(df_year[i, paste(charge, "_w", sep="")], 24)
+    }
+    # Merge winter and summer df based on season
+    df_out = df
+    df_out[, summer] <- df_out_s[, summer]
+    df_out[, winter] <- df_out_w[, winter]
+    # Simplify charge out name
+    charge_out <- sub("\\_.*", "", charge)
+    charge_out <- ifelse(charge_out == "dem", "demand", 
+                  ifelse(charge_out == "eng", "energy", "customer"))
+    # Save out df
+    write_csv(df_out, paste(outdir, "PGE/", size, "Ag_", charge_out, "_", year, ".csv", sep=""), col_names = FALSE)
+  }
+  # Small Ag Service Charge DF for SMUD 2010
+  fill_rateDF('dem_l')
+  fill_rateDF('dem_s')
+  fill_rateDF('eng_l')
+  fill_rateDF('eng_s')
+  fill_rateDF('cus_l')
+  fill_rateDF('cus_s')
+}
+
+# Apply getPGE over list of desired year
+year_list = c(2008:2018)
+lapply(year_list, getPGE)
+```
+
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+#  Merced, Turlock, and Modesto Irrigation Districts #
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+
+# Reports from OpenEI (Demand & Fixed Rates)
+```{r}
+# Demand is simple for all three utilities, no change from week day to weekend or TOU differences
+getIrDistrictDemand = function(district, tier){
+  # Merge winter and summer df based on season
+  df_out = df
+  df_out[, summer] <- rep(demand_s, 24)
+  df_out[, winter] <- rep(demand_w, 24)
+  write_csv(df_out, paste(outdir, district, "IrrigDistrict/", "Ag_demand_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+}
+
+# Fixed charges also simple, fixed across year at $/month
+getIrDistrictFixed = function(district, tier){
+    # Merge winter and summer df based on season
+  df_out = df
+  df_out[, summer] <- rep(fixed_s, 24)
+  df_out[, winter] <- rep(fixed_w, 24)
+  write_csv(df_out, paste(outdir, district, "IrrigDistrict/", "Ag_fixed_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+}
+
+## Merced Irrigation District (SCHEDULE AG-2 AGRICULTURAL DEMAND GENERAL SERVICE): https://apps.openei.org/USURDB/rate/view/539f7193ec4f024411ece77f#3__Energy
+## More desscription: https://mercedid.org/wp-content/uploads/2023/04/AG-2-Board-KY-Edit-050121.pdf
+# DEMAND
+sumDOY = 121
+winDOY = 305
+totd = 365
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+# Get demand & energy rates & fixed charges
+demand_s = 6 # $/kW
+demand_w = 3 # $/kW
+fixed_s  = 15 # $/month
+fixed_w  = 15 # $/month (no distinction, same value)
+yearRevised = 2015
+# Get dataframes. There is no distinction from tier 1 and 2 for Merced Irrig District, so same values
+getIrDistrictDemand("Merced", 1)
+getIrDistrictFixed("Merced", 1)
+getIrDistrictDemand("Merced", 2)
+getIrDistrictFixed("Merced", 2)
+
+# Turlock Irrigation District: https://apps.openei.org/USURDB/rate/view/5b4fc0af5457a38e72c6d679#3__Energy
+## More description: https://issuu.com/turlockirrigationdistrict/docs/schedule_fd__2015_?e=15635682/50057568 & https://issuu.com/turlockirrigationdistrict/docs/schedule_fe__2015_?e=15635682/50057615
+# DEMAND
+sumDOY = 152
+winDOY = 335
+totd = 365
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+# Get demand & energy rates & fixed charges
+demand_s = 9.40 # $/kW
+demand_w = 8.19 # $/kW
+fixed_s  = 31.25 # $/month
+fixed_w  = 31.25 # $/month (no distinction, same value)
+yearRevised = 2018
+# Get dataframes. There is no distinction from tier 1 and 2 for Merced Irrig District, so same values
+getIrDistrictDemand("Turlock", 1)
+getIrDistrictFixed("Turlock", 1)
+getIrDistrictDemand("Turlock", 2)
+getIrDistrictFixed("Turlock", 2)
+
+## Modesto Irrigation District: https://apps.openei.org/USURDB/rate/view/539f74e4ec4f024411ed0d79
+## More desscription: https://www.mid.org/tariffs/rates/p3_water_well_pumping.pdf
+# DEMAND
+sumDOY = 121
+winDOY = 305
+totd = 365
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+# Get demand & energy rates & fixed charges (tier 1)
+demand_s = 0.4 # $/hp -- These arent really summer and winter rates for Modesto, but more so separating out Tiers
+demand_w = 0.4 # $/hp
+fixed_s  = 8 # $/month
+fixed_w  = 8 # $/month (no distinction, same value)
+yearRevised = 2015
+getIrDistrictDemand("Modesto", 1)
+getIrDistrictFixed("Modesto", 1)
+# Get demand & energy rates & fixed charges (tier 2)
+demand_s = 0.8 # $/hp -- These arent really summer and winter rates for Modesto, but more so separating out Tiers
+demand_w = 0.8 # $/hp
+getIrDistrictDemand("Modesto", 2)
+getIrDistrictFixed("Modesto", 2)
+```
+
+# Reports from OpenEI (Energy TOU rates)
+```{r}
+# Get weekday and weekend indices
+yearDOY <- c(1:365)
+weekend <- c(yearDOY[seq(6, length(yearDOY), 7)], yearDOY[seq(7, length(yearDOY), 7)]) %>% sort()
+weekday <- yearDOY[which(!yearDOY %in% weekend)]
+totd = 365
+
+## Merced Irrigation District (SCHEDULE AG-2 AGRICULTURAL DEMAND GENERAL SERVICE): https://apps.openei.org/USURDB/rate/view/539f7193ec4f024411ece77f#3__Energy
+## More desscription: https://mercedid.org/wp-content/uploads/2023/04/AG-2-Board-KY-Edit-050121.pdf
+sumDOY = 121
+winDOY = 305
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+
+# Run function
+getMercedEnergy <- function(tier){
+  # Set weekends
+  df_out = df
+  df_out[, c(summer[which(summer %in% weekend)])] <- rep(eng_per2, 24) # Same for both
+  df_out[, c(winter[which(winter %in% weekend)])] <- rep(eng_per1, 24) # Same for both
+  # Set weekdays
+  df_out[, c(summer[which(summer %in% weekday)])] <- rep(eng_per2, 24) # Same for both
+  df_out[, c(winter[which(winter %in% weekday)])] <- rep(eng_per1, 24) # Same for both
+  write_csv(df_out, paste(outdir, "MercedIrrigDistrict/", "Ag_energy_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+  # Run for adjustments dataframe
+  df_out = df
+  df_out[, yearDOY] <- rep(eng_adjs, 24) # Same for both
+  write_csv(df_out, paste(outdir, "MercedIrrigDistrict/", "Ag_energy_adj_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+}
+
+# Rates
+eng_per1 = 0.088 # $/kWh
+eng_per2 = 0.118 # $/kWh
+eng_adjs = 0.000 # $/kWh -- same for all periods and tiers
+yearRevised = 2015
+
+# Run function for tier 1, and arbitrarily for tier 2 (no distinction)
+getMercedEnergy(1)
+getMercedEnergy(2)
+
+
+# Turlock Irrigation District: https://apps.openei.org/USURDB/rate/view/5b4fc0af5457a38e72c6d679#3__Energy
+## More description: https://issuu.com/turlockirrigationdistrict/docs/schedule_fd__2015_?e=15635682/50057568 & https://issuu.com/turlockirrigationdistrict/docs/schedule_fe__2015_?e=15635682/50057615
+sumDOY = 152
+winDOY = 335
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+
+# Run function
+getTurlockEnergy <- function(tier){
+  # Set weekends
+  df_out = df
+  df_out[, c(summer[which(summer %in% weekend)])] <- rep(eng_per1, 24) # Same for both
+  df_out[, c(winter[which(winter %in% weekend)])] <- rep(eng_per1, 24) # Same for both
+  # Set weekdays
+  df_out[, c(summer[which(summer %in% weekday)])] <- c(rep(eng_per2, 12), rep(eng_per4, 9), rep(eng_per2, 3)) # summer 
+  df_out[, c(winter[which(winter %in% weekday)])] <- c(rep(eng_per1, 12), rep(eng_per3, 9), rep(eng_per1, 3)) # winter
+  write_csv(df_out, paste(outdir, "TurlockIrrigDistrict/", "Ag_energy_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+  # Run for adjustments dataframe
+  df_out = df
+  df_out[, yearDOY] <- rep(eng_adjs, 24) # Same for both
+  write_csv(df_out, paste(outdir, "TurlockIrrigDistrict/", "Ag_energy_adj_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+}
+
+# Rates
+eng_per1 = 0.0558 # $/kWh
+eng_per2 = 0.0647 # $/kWh
+eng_per3 = 0.0839 # $/kWh
+eng_per4 = 0.1099 # $/kWh
+eng_adjs = 0.0219 # $/kWh -- same for all periods and tiers
+yearRevised = 2018
+
+# Run function for tier 1, and arbitrarily for tier 2 (no distinction)
+getTurlockEnergy(1)
+getTurlockEnergy(2)
+
+
+## Modesto Irrigation District: https://apps.openei.org/USURDB/rate/view/539f74e4ec4f024411ed0d79
+## More desscription: https://www.mid.org/tariffs/rates/p3_water_well_pumping.pdf
+sumDOY = 121
+winDOY = 274
+summer = c(sumDOY:(winDOY-1))
+winter = c(1:(sumDOY-1), winDOY:totd)
+yearRevised = 2015
+
+# Run function
+getModestoEnergy <- function(tier){
+  # Set weekends
+  df_out = df
+  df_out[, c(summer[which(summer %in% weekend)])] <- rep(eng_per1, 24) # Same for both
+  df_out[, c(winter[which(winter %in% weekend)])] <- rep(eng_per2, 24) # Same for both
+  # Set weekdays
+  df_out[, c(summer[which(summer %in% weekday)])] <- rep(eng_per1, 24) # Same for both
+  df_out[, c(winter[which(winter %in% weekday)])] <- rep(eng_per2, 24) # Same for both
+  write_csv(df_out, paste(outdir, "ModestoIrrigDistrict/", "Ag_energy_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+  # Run for adjustments dataframe
+  df_out = df
+  df_out[, yearDOY] <- rep(eng_adjs, 24) # Same for both
+  write_csv(df_out, paste(outdir, "ModestoIrrigDistrict/", "Ag_energy_adj_tier", tier, "_", yearRevised, ".csv", sep=""), col_names = FALSE)
+}
+
+# Rates (Tier 1)
+eng_per1 = 0.1418 # $/kWh
+eng_per2 = 0.1257 # $/kWh
+eng_adjs = 0.0123 # $/kWh
+# Run function for tier 1
+getModestoEnergy(1)
+
+# Rates (Tier 2)
+eng_per1 = 0.1286 # $/kWh
+eng_per2 = 0.1146 # $/kWh
+eng_adjs = 0.0123 # $/kWh
+# Run function for tier 2
+getModestoEnergy(2)
+```
+
+# Missing Irrigation District Years
+```{r}
+# For missing years (currently 2008, 2009, 2012), use bundled system average rates to estimate missing data -- only following years for reference
+getMissingYrs_IrrigDistrict = function(util, ref_yr, missing_yr){
+  # Get utility dfs for nearest reference year
+  Ag_demand_tier1 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_demand_tier1_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_demand_tier2 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_demand_tier2_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_energy_tier1 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_energy_tier1_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_energy_tier2 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_energy_tier2_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_energyAdd_tier1 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_energy_adj_tier1_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_energyAdd_tier2 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_energy_adj_tier2_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_fixed_tier1 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_fixed_tier1_", ref_yr, ".csv", sep=""), header=FALSE)
+  Ag_fixed_tier2 <- read.csv(paste(outdir, util, "IrrigDistrict/", "Ag_fixed_tier2_", ref_yr, ".csv", sep=""), header=FALSE)
+  
+  # Get multiplier for reference year from bundled SAR for PG&E (because not SCE)
+  yr_list <- c(2008:2018)
+  yr_list <- yr_list[which(yr_list <= ref_yr & yr_list > missing_yr)]
+  # if missing year is after ref_year, multiplier is = 1, which is appropriate given these utilities have not changed since their last edit, so subsequent years are same as scraped year
+  bun_SAR_multiplier <- bun_SAR$PGE[which(bun_SAR$Year %in% yr_list)] %>% prod() # multiplicative product of rate of change
+  
+  # Adjust dataframes by multiplier -- divided because we are using later years to reference for earlier years (backwards rate of change)
+  Ag_demand_tier1 <- Ag_demand_tier1 / bun_SAR_multiplier
+  Ag_demand_tier2 <- Ag_demand_tier2 / bun_SAR_multiplier
+  Ag_energy_tier1 <- Ag_energy_tier1 / bun_SAR_multiplier
+  Ag_energy_tier2 <- Ag_energy_tier2 / bun_SAR_multiplier
+  Ag_energyAdd_tier1 <- Ag_energyAdd_tier1 / bun_SAR_multiplier
+  Ag_energyAdd_tier2 <- Ag_energyAdd_tier2 / bun_SAR_multiplier
+  Ag_fixed_tier1 <- Ag_fixed_tier1 / bun_SAR_multiplier
+  Ag_fixed_tier2 <- Ag_fixed_tier2 / bun_SAR_multiplier
+  
+  # Export new dfs
+  write_csv(Ag_demand_tier1, paste(outdir, util, "IrrigDistrict/", "Ag_demand_tier1_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_demand_tier2, paste(outdir, util, "IrrigDistrict/", "Ag_demand_tier2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_energy_tier1, paste(outdir, util, "IrrigDistrict/", "Ag_energy_tier1_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_energy_tier2, paste(outdir, util, "IrrigDistrict/", "Ag_energy_tier2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_energyAdd_tier1, paste(outdir, util, "IrrigDistrict/", "Ag_energy_adj_tier1_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_energyAdd_tier2, paste(outdir, util, "IrrigDistrict/", "Ag_energy_adj_tier2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_fixed_tier1, paste(outdir, util, "IrrigDistrict/", "Ag_fixed_tier1_", missing_yr, ".csv", sep=""), col_names = FALSE)
+  write_csv(Ag_fixed_tier2, paste(outdir, util, "IrrigDistrict/", "Ag_fixed_tier2_", missing_yr, ".csv", sep=""), col_names = FALSE)
+}
+
+# Run missing year function for years prior to reference year 
+for(year in c(2008:2014, 2016:2018)){getMissingYrs_IrrigDistrict(util = "Merced", ref_yr = 2015, missing_yr = year)}
+for(year in c(2008:2017)){getMissingYrs_IrrigDistrict(util = "Turlock", ref_yr = 2018, missing_yr = year)}
+for(year in c(2008:2014, 2016:2018)){getMissingYrs_IrrigDistrict(util = "Modesto", ref_yr = 2015, missing_yr = year)}
+```
