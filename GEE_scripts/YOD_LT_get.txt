@@ -1,0 +1,593 @@
+//#####################################################################################################################//
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////                                       ////////////////////////////////////////
+//////////////////////////////////////////  FEWC Renewable Function-Call Script ////////////////////////////////////////
+//////////////////////////////////////////                                       ////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//#####################################################################################################################//
+ 
+/*
+-- Information --
+Author: Jacob Stid
+Date Created: 11-17-2021
+Date Updated: 05-18-2022
+Contact: stidjaco@msu.edu (Jacob Stid)
+
+-- Notes --
+*/
+
+exports.doc = 'FEWC Renewable Energy Functions';
+
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                              Global Variable and Dataset Definition                                #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+/*
+-- Notes --
+Define the global variables and datasets for all functions
+*/
+
+//############################################################################\\
+/////////////////////////////// Get Datasets \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+//############################################################################\\
+
+// Get NAIP imagecollection, filter dates to remove non-4band imagey, and set and select NDPVI
+var NAIP = ee.ImageCollection('USDA/NAIP/DOQQ').filterDate('2014-01-01', '2020-12-31').map(function(image){
+  // Return PV indices: NDPVI, NBD, and Br from Stid et al 2021. First, NDPVI
+  return image.addBands(image.expression('((0.5*Blue-NIR) / (0.5*Blue+NIR))', {
+               'Blue': image.select('B'),
+               'NIR': image.select('N')}).rename('NDPVI'))
+       // Add Normalized Blue Deviation
+        .addBands(image.expression('((Blue-((Red+Green)/2)) / (Blue+((Red+Green)/2)))', {
+               'Blue': image.select('B'),
+               'Red': image.select('R'),
+               'Green': image.select('G')}).rename('NBD'))
+        // Add Brightness
+        .addBands(image.expression('((Red+Blue+Green+NIR)/255/4 )', { // /255 normalizes to 0 to 1 scale, 32767 gets to int16
+               'Blue': image.select('B'),
+               'Red': image.select('R'),
+               'Green': image.select('G'),
+               'NIR': image.select('N')}).rename('Br'))
+        // Add Veg index
+        .addBands(image.expression('(2 * NIR + 1 - sqrt(pow((2 * NIR + 1), 2) - 8 * (NIR - Red)) ) / 2', { // /255 normalizes to 0 to 1 scale, 32767 gets to int16
+               'Blue': image.select('B'),
+               'Red': image.select('R'),
+               'Green': image.select('G'),
+               'NIR': image.select('N')}).rename('MSAVI2'))
+        // Add Veg index
+        .addBands(image.expression('NIR/Green-1', { // /255 normalizes to 0 to 1 scale, 32767 gets to int16
+               'Blue': image.select('B'),
+               'Red': image.select('R'),
+               'Green': image.select('G'),
+               'NIR': image.select('N')}).rename('GCVI'));
+}).select(['NDPVI', 'NBD', 'Br', 'MSAVI2', 'GCVI']);
+
+// CDL cropland image collection
+var Cropland = ee.ImageCollection('USDA/NASS/CDL').select('cropland');
+
+// Get LCMAP
+var LCMAP = ee.ImageCollection("projects/sat-io/open-datasets/LCMAP/LCPRI").select('b1');
+
+// Get building dataset (https://samapriya.github.io/awesome-gee-community-datasets/projects/usbuild_raster/)
+var building_bin = ee.Image("projects/sat-io/open-datasets/us_building_raster/building_count");
+
+// Set PV index thresholds for panel detection 
+var ndpvi_thresh = -0.4 ;
+var nbd_thresh = -0.05 ;
+var br_thresh = 0.20 ;
+
+
+
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                            Solar Non-panel & non-ground mountedremoval                             #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+/*
+-- Notes --
+This script removes shapes that dont have panels as of the most recent imagery
+*/
+
+// Remove arrays with no panels
+var rm_nonpanel = function(feature){
+  //############################################################################\\
+  ////////// Get Panel shapes, Panel Count, Direct Area, and Frame Tech \\\\\\\\\\
+  //############################################################################\\
+  
+  // Set aoi
+  var aoi = feature.geometry();//.buffer(5); // buffer area out incase shapes missed panels
+  
+  // Get 1km buffer bounds for image collection filtering
+  var listCoords = ee.Array.cat(aoi.centroid().buffer(2500).bounds().coordinates(), 1); // 2.5 km buffer, naip tiles are about 5km
+  var xCoords = listCoords.slice(1, 0, 1); 
+  var yCoords = listCoords.slice(1, 1, 2);
+  var xMin = xCoords.reduce('min', [0]).get([0,0]);
+  var xMax = xCoords.reduce('max', [0]).get([0,0]);
+  var yMin = yCoords.reduce('min', [0]).get([0,0]);
+  var yMax = yCoords.reduce('max', [0]).get([0,0]);
+
+  // Select the most recent image from image collection for aoi, this process ensure that images at different dates and flight paths are still included
+  // the IF is for if imagery is not available in this location (some regions naip is not available)
+  var PV_indices_1 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMin, yMin)).limit(1, 'system:time_start', false).first());
+  var PV_indices_2 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMin, yMax)).limit(1, 'system:time_start', false).first());
+  var PV_indices_3 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMax, yMin)).limit(1, 'system:time_start', false).first());
+  var PV_indices_4 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMax, yMax)).limit(1, 'system:time_start', false).first());
+  var PV_indices = ee.Image(ee.Algorithms.If(PV_indices_1, ee.ImageCollection([PV_indices_1, PV_indices_2, PV_indices_3, PV_indices_4]).mosaic().clip(aoi), 
+                                                  ee.Image([-1, -1, -1]).rename(['NDPVI', 'NBD', 'Br']).clip(aoi))); // blank image if NAIP doesnt exist
+  
+  // Get a binary area image where '1' = solar panel,  '0' = no solar panel. Band thresholds from Stid et al. 2022 (in review)
+  var bin = PV_indices.select(['NDPVI']).gt(ndpvi_thresh).and(
+            PV_indices.select(['NBD']).gt(nbd_thresh)).and(
+            PV_indices.select(['Br']).gt(br_thresh));
+  var binary_panels = bin.updateMask(bin); 
+
+  // Create temp binary_panels to use if imagery was taken before installation (this is just the array shape rasterized)
+  var binary_panels_temp = ee.FeatureCollection(feature).map(function(feature){
+      return feature.set({NDPVI: 1});
+  }).reduceToImage({
+      properties: ['NDPVI'], // Arbitrary "value" for raster mask
+      reducer: ee.Reducer.max()
+  }).rename('NDPVI');
+
+  ///////////////////////////////////////////////
+  /////////////////////////////////////////////// Conditional section based on IF panels exist in imagery (or if YOD is after imagery date), and IF array is over 20 MW to simplify process
+  ///////////////////////////////////////////////
+
+  // Set capacity and number of pixels threshold
+  var cap_thresh = 50 ;// MW
+  var size_thresh = 30 ;// pixels
+  
+  // Reduce region to count pv pixels (testing if a panel is present or not)
+  var pv_present = binary_panels.reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: aoi,
+      scale: 1,
+      maxPixels: 1e9
+    }).getNumber('NDPVI').toInt();
+
+  // If panel is present in imagery, use PV_indicies to find panels and panel area, else just use native dataset geometry
+  var binary_panels = ee.Image(ee.Algorithms.If(ee.Number(pv_present).gte(size_thresh), binary_panels, 
+                                                                               binary_panels_temp));
+
+  // Only perform full PF, and new direct area analysis if array is less than 20 MW, otherwise, take small sample from centroid of of aoi
+  var temp_aoi = ee.FeatureCollection.randomPoints({region: aoi.buffer(-10), points: 1, seed: 15}).geometry().buffer(250);
+  // Solves GEE memory issues
+  var panels = ee.FeatureCollection(ee.Algorithms.If(ee.Number(feature.getNumber('cap_mw').lt(cap_thresh)).and(ee.Number(pv_present).gte(size_thresh)), 
+    binary_panels.reduceToVectors({
+            geometry: aoi,
+            crs: PV_indices.projection(),
+            scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale(),
+            geometryType: 'polygon',
+            eightConnected: true,
+            labelProperty: 'panel',
+            maxPixels: 1e13,
+            bestEffort: true
+    }), ee.Algorithms.If(ee.Number(feature.getNumber('cap_mw').lt(cap_thresh)).and(ee.Number(pv_present).lt(size_thresh)),
+    binary_panels.reduceToVectors({
+            geometry: aoi,
+            crs: PV_indices.projection(),
+            scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale(),
+            geometryType: 'polygon',
+            eightConnected: true,
+            labelProperty: 'panel',
+            maxPixels: 1e13,
+            bestEffort: true}),
+    binary_panels.reduceToVectors({
+            geometry: temp_aoi, // temp_aoi buffered by 50 meters in each direction to get panel type
+            crs: PV_indices.projection(),
+            scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale(),
+            geometryType: 'polygon',
+            eightConnected: true,
+            labelProperty: 'panel',
+            maxPixels: 1e13,
+            bestEffort: true
+    }))));
+  
+  // If panels results in no data, create feature collection of aoi
+  var temp_pnl_area = panels.geometry().area(1);
+  
+  // Get building area within array shape
+  // Get NAIP ndvi image with panels masked
+  var build_bin = building_bin.clip(aoi).gte(1);
+  var areaImage = build_bin.updateMask(build_bin).unmask(0).multiply(ee.Image.pixelArea());
+  var build = areaImage.reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e9
+    }).getNumber('b1');
+  
+  // Set threshold for building area contained within array inferring rooftop
+  var build_threshold = 0.75 // if 75% or more of an array intersects a building, considered rooftop
+  var build_temp = ee.Number(ee.Algorithms.If(build, ee.Number(build).toInt(), 0));
+  var rooftop = ee.Number(ee.Algorithms.If(ee.Number(build_temp).divide(aoi.area()).lt(build_threshold), 0, 1))
+  
+  // Set whether or not to remove array -- No means dont remove array, yes means remove array (either no panels, or rooftop)
+  var no_panels = ee.Number(ee.Algorithms.If(ee.Number(temp_pnl_area).gte(size_thresh).and(ee.Number(pv_present).gte(size_thresh)), 0, 1))
+  var rm_array = ee.String(ee.Algorithms.If(ee.Number(no_panels).eq(0).and(ee.Number(rooftop).eq(0)), "No", "Yes"))
+    
+  // Return new property to feature based on temp_pnl_area
+  return feature.set({rm_array: rm_array, rooftop: rooftop});
+} ; 
+    
+    
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                                  Solar Characterization function                                   #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+/*
+-- Notes --
+This script is for the processing of CONUS solar and wind power datasets. Datasets are from Kruitwagen et al, Stid et al, Dunnett et al, 
+and uses methodlogy from Stid et al to aquire panels, panel areas, appropriate direct areas, and array frame technologies. 
+*/
+
+// Geographic object based image analysis to characterize new solar dataset
+var geobia_conus_run = function(feature){
+
+  //############################################################################\\
+  ////////// Get Panel shapes, Panel Count, Direct Area, and Frame Tech \\\\\\\\\\
+  //############################################################################\\
+   
+  // Set aoi
+  var aoi = feature.geometry()//.buffer(5); // buffer area out incase shapes missed panels
+  
+  // Get 1km buffer bounds for image collection filtering
+  var listCoords = ee.Array.cat(aoi.centroid().buffer(2500).bounds().coordinates(), 1); // 2.5 km buffer, naip tiles are about 5km
+  var xCoords = listCoords.slice(1, 0, 1); 
+  var yCoords = listCoords.slice(1, 1, 2);
+  var xMin = xCoords.reduce('min', [0]).get([0,0]);
+  var xMax = xCoords.reduce('max', [0]).get([0,0]);
+  var yMin = yCoords.reduce('min', [0]).get([0,0]);
+  var yMax = yCoords.reduce('max', [0]).get([0,0]);
+
+  // Select the most recent image from image collection for aoi, this process ensure that images at different dates and flight paths are still included
+  // the IF is for if imagery is not available in this location (some regions naip is not available)
+  var PV_indices_1 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMin, yMin)).limit(1, 'system:time_start', false).first());
+  var PV_indices_2 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMin, yMax)).limit(1, 'system:time_start', false).first());
+  var PV_indices_3 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMax, yMin)).limit(1, 'system:time_start', false).first());
+  var PV_indices_4 = ee.Image(NAIP.filterBounds(ee.Geometry.Point(xMax, yMax)).limit(1, 'system:time_start', false).first());
+  var PV_indices = ee.ImageCollection([PV_indices_1, PV_indices_2, PV_indices_3, PV_indices_4]).mosaic().clip(aoi);
+  
+  // Get a binary area image where '1' = solar panel,  '0' = no solar panel. Band thresholds from Stid et al. 2022 (in review)
+  var bin = PV_indices.select(['NDPVI']).gt(ndpvi_thresh).and(
+            PV_indices.select(['NBD']).gt(nbd_thresh)).and(
+            PV_indices.select(['Br']).gt(br_thresh));
+  var binary_panels = bin.updateMask(bin); 
+
+  ///////////////////////////////////////////////
+  /////////////////////////////////////////////// Conditional section based on IF panels exist in imagery (or if YOD is after imagery date), and IF array is over 20 MW to simplify process
+  ///////////////////////////////////////////////
+
+  // Set capacity and number of pixels threshold
+  var cap_thresh = 50 ;// MW
+  var size_thresh = 30 ;// pixels
+
+  // Only perform full PF, and new direct area analysis if array is less than 20 MW, otherwise, take small sample from centroid of of aoi
+  var temp_aoi = ee.FeatureCollection.randomPoints({region: aoi.buffer(-10), points: 1, seed: 15}).geometry().buffer(250);
+  // Solves GEE memory issues
+  var panels = ee.FeatureCollection(ee.Algorithms.If(ee.Number(feature.getNumber('cap_mw').lt(cap_thresh)), 
+    binary_panels.reduceToVectors({
+            geometry: aoi,
+            crs: PV_indices.projection(),
+            scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale(),
+            geometryType: 'polygon',
+            eightConnected: true,
+            labelProperty: 'panel',
+            maxPixels: 1e13,
+            bestEffort: true
+    }), binary_panels.reduceToVectors({
+            geometry: temp_aoi, // temp_aoi buffered by 50 meters in each direction to get panel type
+            crs: PV_indices.projection(),
+            scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale(),
+            geometryType: 'polygon',
+            eightConnected: true,
+            labelProperty: 'panel',
+            maxPixels: 1e13,
+            bestEffort: true
+    })));
+  
+  // Reduce resolution and retain naip projection (for large arrays)
+  var aoi_image = binary_panels.clip(aoi)
+    .reproject({
+      crs: PV_indices.projection(), 
+      scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale()})
+    .reduceResolution({
+      reducer: ee.Reducer.max(), 
+      maxPixels: 65535})    
+    .reproject({
+      crs: PV_indices.projection(), 
+      scale: 10}); // reduced resolution to 10m
+
+  // If panels exist in NAIP, create new geometry for direct area, and calculate new direct area. 
+  // Buffer by 5 meters (address spatial errors) and combine, and reduce buffer
+  // If NAIP raster to vector returns an empty collection, keep prior geometry (probably because latest NAIP doenst contain solar yet)
+  var new_aoi_wNull = ee.Geometry(ee.Algorithms.If(ee.Number(feature.getNumber('cap_mw').lt(cap_thresh)),
+                              ee.FeatureCollection(panels.union({maxError: 100}).geometry().buffer(5)).union({maxError: 1}) // groups panels 
+                                                    .geometry().buffer(ee.Number(5).multiply(-1)), 
+                              // Array too large to reduce to vectors, but likely has correct direct area anyway, so use dataset native aoi and direct area
+                              aoi_image.reduceToVectors({
+                                geometry: aoi, // centroid buffered by 50 meters in each direction
+                                crs: PV_indices.projection(),
+                                scale: PV_indices.reproject('EPSG:5070', null).projection().nominalScale(),
+                                geometryType: 'polygon',
+                                eightConnected: true,
+                                labelProperty: 'panel',
+                                maxPixels: 1e13,
+                                bestEffort: true
+                              }).union({maxError: 100}).geometry().buffer(ee.Number(5).multiply(-1)))).simplify({maxError: 1}); // reduces buffer error, simplify for computational capacity
+  
+  // This ensures there are no degenerate (point-sized) geometries that violate GEE Topology 
+  var new_aoi = ee.Geometry.MultiPolygon(new_aoi_wNull.geometries().map(function(geometry){
+      geometry = ee.Geometry(geometry);
+      return ee.Algorithms.If(geometry.type().compareTo('Polygon'), null, geometry);
+    }, true)); // true is for drop nulls
+ 
+  // Get new direct area
+  var new_dir_a = new_aoi.area(1).toInt(); // in square meters
+  
+  // Get panel count if panels exist and array under 20 MW
+  var panel_count = ee.Number(ee.Algorithms.If(ee.Number(feature.getNumber('cap_mw').lt(cap_thresh)), ee.Number(panels.size()).toInt(), -9999));
+
+  ///////////////////////////////////////////////
+  /////////////////////////////////////////////// Conditional section based on IF panels exist in imagery (or if YOD is after imagery date), and IF array is over 20 MW to simplify process
+  ///////////////////////////////////////////////
+
+  // Get frame technology from coordinate differnce of 90th percentile largest panel (count = number of pixels wihtin shape)
+  var panel_med = ee.Algorithms.If(panels.size().gt(2), ee.Number(panels.size().multiply(0.90).toInt()), 1); // get 90th percentile panel panel based on size -- if more than two panels
+  var panel_medSize_subset = panels.limit({max: panel_med, property: 'count', ascending: true})
+  var listCoords = ee.Array.cat(panel_medSize_subset.limit({max: 1, property: 'count', ascending: false})
+                                                    .first().geometry().bounds().coordinates(), 1); 
+  // get the X and Y -coordinates
+  var xCoords = listCoords.slice(1, 0, 1);
+  var yCoords = listCoords.slice(1, 1, 2);
+  // reduce the arrays to find the max (or min) value
+  var xMin = xCoords.reduce('min', [0]).get([0,0]);
+  var xMax = xCoords.reduce('max', [0]).get([0,0]);
+  var yMin = yCoords.reduce('min', [0]).get([0,0]);
+  var yMax = yCoords.reduce('max', [0]).get([0,0]);
+  // Get height and width of panel
+  var height = ee.Number(yMax).subtract(ee.Number(yMin)).multiply(11160);
+  var width = ee.Number(xMax).subtract(ee.Number(xMin)).multiply(11160);
+  var single_ratio = ee.Number(height).divide(width);
+  var fixed_ratio = ee.Number(width).divide(height);
+
+  // Set ground mounted array technology, H:W ratio > 2 = Single axis, W:H ratio > 1.5 = Fixed Axis, either < 1.5 = Double axis or CSP spire
+  var mount = ee.String(ee.Algorithms.If(ee.Number(single_ratio).gte(1.25), 'single_axis', 
+              ee.Algorithms.If(ee.Number(fixed_ratio).gte(1.25), 'fixed_axis', 'double_axis')));
+
+
+  //############################################################################\\
+  ////////////////////////////////// Get PF \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+  //############################################################################\\
+  
+  // Compute pixel area function
+  var areaImage = binary_panels.unmask(0).reproject({crs: 'EPSG:5070', scale: 1});
+  
+  // Calculate the panel area
+  var panel_area = areaImage.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: new_aoi,
+    scale: 1,
+    maxPixels: 1e13
+  }).getNumber('NDPVI').toInt();
+    
+  // Calculate Packing Factor and turn into a thousand-percent for export
+  var PF_wnull = panel_area.divide(new_dir_a).multiply(1000);
+  
+  // If no panel area within shape, set to null (in %)
+  var PF = ee.Number(ee.Algorithms.If(PF_wnull, ee.Number(PF_wnull).toInt().divide(10), -9999)).toInt();
+  
+  //############################################################################\\
+  //////////////////////////// Simplify Capacity \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+  //############################################################################\\
+  
+  // Get capacity and set to four decimal places
+  var cap_mw = feature.getNumber('cap_mw').multiply(1000).toInt().divide(1000);
+
+  // Return new geometry, panel count, mounting technology, direct area, panel area, and PF 
+  return feature.set({pnl_cnt: panel_count, mount: mount, dir_a: new_dir_a, pnl_a: panel_area, 
+                      PF: PF, cap_mw: cap_mw}).setGeometry(new_aoi);
+};
+
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                Copy Attriubes for Arrays which GEOBIA could not be performed on                    #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+// Geographic object based image analysis to characterize new solar dataset
+var rm_array_geobia = function(feature){
+  // Set attribues
+  var panel_count = ee.Number(-9999).toInt();
+  var mount = ee.String(ee.Number(-9999).toInt());
+  var panel_area = ee.Number(-9999).toInt();
+  var PF = ee.Number(-9999).toInt();
+  var new_dir_a = feature.getNumber('dir_a').toInt();
+  var cap_mw = feature.getNumber('cap_mw').multiply(1000).toInt().divide(1000);
+  // Create a new simplified geometry for these because they are causing export issue -- Re-group with original geometries in R
+  var new_aoi = ee.Geometry.Polygon(feature.geometry().centroid().buffer(5).coordinates())
+  // Return new geometry, panel count, mounting technology, direct area, panel area, and PF 
+  return feature.set({pnl_cnt: panel_count, mount: mount, dir_a: new_dir_a, pnl_a: panel_area, 
+                      PF: PF, cap_mw: cap_mw}).setGeometry(new_aoi);
+};
+
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                                 Landcover (LCMAP & CDL) function                                   #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+// Function for extracting CDL crop types
+var lc_conus_run = function(feature){
+  //###########################################################################
+  // Extract CDL croptype from shape
+  //###########################################################################
+  
+  // Set aoi
+  var aoi = feature.geometry();
+  
+  // Get YOD
+  var YOD_temp = feature.get('Yr_inst');
+  
+  // Check if YOD exists, if not, get most recent land cover
+  var YOD = ee.Algorithms.If(ee.Number(YOD_temp).eq(-9999), 2019, YOD_temp);
+  
+  // Get LCMAP landcover classification
+  var lcmap_bnds = [1985, 2019];
+  var lcmap_year_temp = ee.Algorithms.If(ee.Number(YOD).lt(lcmap_bnds[0]), lcmap_bnds[0], ee.Number(YOD));
+  var lcmap_year = ee.Algorithms.If(ee.Number(lcmap_year_temp).gt(lcmap_bnds[1]), lcmap_bnds[1], ee.Number(lcmap_year_temp));
+  var lcmap_year_diff = ee.Number(lcmap_year).subtract(1984);
+  var lcmap_year_start = ee.Date('1984-01-01').advance(lcmap_year_diff, 'year');
+  var lcmap_year_end = ee.Date('1984-12-31').advance(lcmap_year_diff, 'year');
+  
+  // Call in LCMAP for renewable boundary
+  var lcmap_landcover = LCMAP.filterDate(lcmap_year_start, lcmap_year_end)
+    .median()
+    .unmask(5) // open water
+    .reproject('EPSG:4326', null, 30)
+    .clip(aoi);
+  
+  // CDL year (one year prior to YOD) -- croptype just before conversion
+  // Conus CDL is only available between 2008 and 2020, force this range for now
+  var cdl_bnds = [2008, 2020];
+  var cdl_year_temp = ee.Algorithms.If(ee.Number(YOD).lte(cdl_bnds[0]), cdl_bnds[0], ee.Number(YOD).subtract(1));
+  var cdl_year = ee.Algorithms.If(ee.Number(cdl_year_temp).gt(cdl_bnds[1]), cdl_bnds[1], ee.Number(cdl_year_temp));
+  var cdl_year_diff = ee.Number(cdl_year).subtract(2007);
+  var cdl_year_start = ee.Date('2007-01-01').advance(cdl_year_diff, 'year');
+  var cdl_year_end = ee.Date('2007-12-31').advance(cdl_year_diff, 'year');
+
+  // Call in CDL for renewable boundary
+  var Croptype = Cropland.filterDate(cdl_year_start, cdl_year_end)
+                  .first()
+                  .unmask(111) // open water
+                  .reproject('EPSG:4326', null, 30) 
+                  .clip(aoi);
+
+  // CDL landcover mode within renewable boundary
+  var CDL_crop_wnull = Croptype.reduceRegion({
+      reducer: ee.Reducer.mode(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('cropland');
+  // If no CDL detected within polygon, set to NA
+  var CDL_crop = ee.Number(ee.Algorithms.If(CDL_crop_wnull, CDL_crop_wnull, -9999)).toInt();
+    
+  // LCMAP landcover mode within renewable boundary
+  var lcmap_lc_wnull = lcmap_landcover.reduceRegion({
+      reducer: ee.Reducer.mode(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('b1');
+  // If no LCMAP values detected within polygon, set to NA
+  var lcmap_lc = ee.Number(ee.Algorithms.If(lcmap_lc_wnull, lcmap_lc_wnull, -9999)).toInt();
+
+  // Return the feature with the year set 
+  return feature.set({cdl_1yr: CDL_crop, lcmap_lc: lcmap_lc});
+};
+
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                                     LANDTRENDR Solar Function                                      #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+//##########################################################################\\
+/////////////////////////////// Prep-LandTrendr \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+//##########################################################################\\
+
+// define collection parameters
+var startYear = 1984; 
+var endYear = 2021;
+var startDay = '01-01'; // 06-01
+var endDay = '12-31';   // 09-30
+var index = 'NDPVI'; // either NDPVI for solar or NDVI for wind
+var maskThese = ['cloud', 'shadow', 'snow', 'water'];
+
+// define landtrendr parameters
+var runParams = { 
+  maxSegments:            6,    // 6
+  spikeThreshold:         0.9,  // 0.9
+  vertexCountOvershoot:   3,    // 3
+  preventOneYearRecovery: true, // true
+  recoveryThreshold:      0.02777777778, //  0.25, 1/years to recovery  # should be no recovery so 1/YOD range
+  pvalThreshold:          0.05, // 0.05
+  bestModelProportion:    0.75, // 0.75
+  minObservationsNeeded:  6     // 6
+};
+
+// define change parameters for first segmentation period
+var changeParams = {
+  delta:  'loss',  // fastest decrease of NDPVI value because flipped in landtrendr.js
+  sort:   'fastest', // fastest
+  year:   {checked:true, start:2008, end:2018},
+  mag:    {checked:false, value:50,  operator:'>'}, //, dsnr:true}, // if remove dsnr, value changes to 100
+  dur:    {checked:false, value:1,    operator:'>'}, // specific to year range
+  preval: {checked:false, value:500,  operator:'<'},
+  mmu:    {checked:false, value:3},  
+  //endval: {checked:true, value:900,  operator:'>'},
+};
+
+//############################################################################
+// END INPUTS
+//############################################################################
+
+// load the LandTrendr.js module
+//var ltgee = require('users/emaprlab/public:Modules/LandTrendr.js'); 
+var ltgee = require('users/stidjaco/SourceCode:LandTrendrIMPERV.js'); 
+
+// add index to changeParams object
+changeParams.index = index;
+
+// Actual Landtrendr function to aquire installation year
+var lt_solar_run = function(feature){
+  
+  //############################################################################
+  // END INPUTS
+  //############################################################################
+  
+  // Set aoi
+  var aoi = feature.geometry();
+
+  // run landtrendr
+  var lt = ltgee.runLT(startYear, endYear, startDay, endDay, aoi, index, [], runParams, maskThese);
+  
+  // get the change map layers for first and second segmentation period
+  var changeImg = ltgee.getChangeMap(lt, changeParams).clip(aoi);
+  
+  // Subset for year of detection
+  var YOD_installed = changeImg.select(['yod']).clip(aoi);
+  
+  //###########################################################################
+  // Extract YOD from shape
+  //###########################################################################
+
+  // Year of detection mode within renewable boundary (includes nulls where no change detected) -- First Segmentation period
+  var YOD_wnull = YOD_installed.reduceRegion({
+      reducer: ee.Reducer.mode(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('yod');
+  // If no LandTrendr detected change within polygon, set to NA
+  var YOD = ee.Number(ee.Algorithms.If(YOD_wnull, YOD_wnull, -9999)).toInt();
+
+  // Return the feature with the year set 
+  return feature.set({Yr_inst: YOD});
+};
+
+// Export functions for solar
+exports.rm_nonpanel = rm_nonpanel;
+exports.rm_array_geobia = rm_array_geobia; 
+exports.geobia_conus_run = geobia_conus_run;
+exports.lt_solar_run = lt_solar_run;
+
+
+// Export functions for wind (and solar -- lulc)
+exports.lc_conus_run = lc_conus_run;

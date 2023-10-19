@@ -1,0 +1,54 @@
+
+// Constants & Large ImageCollection and FeatureCollection Datasets: Call in once and subset
+var States = ee.FeatureCollection('TIGER/2018/States'); // State shapefile
+var Counties = ee.FeatureCollection('TIGER/2018/Counties'); // County shapefiles
+var gridMET = ee.ImageCollection("IDAHO_EPSCOR/GRIDMET"); // daily precipitation raster
+var CONUS = ee.FeatureCollection("users/stidjaco/CONUS_shp") ;// CONUS extent
+
+// gridMET precip exported for CONUS
+var precip_export = function(Year){
+  
+  // Get state and county boundaries
+  var counties = Counties.filterBounds(CONUS)
+  
+  // Precipitation Dataset (Annual gridMET Precipitation Sum)
+  // https://www.sciencedirect.com/science/article/pii/S0034425720304181
+  var precip = gridMET
+                .select(['pr'])
+                .filterDate(Year+'-01-01', Year+'-12-31')
+                .sum()
+                .clip(CONUS); 
+  // Compute county level annual average precip
+  var ppt_function = function(feature) {
+      var ppt_avg = precip.reduceRegion({
+          reducer: ee.Reducer.mean(),
+          geometry: feature.geometry(),
+          scale: 4000, // gridMET is 4km resolution
+          maxPixels: 1e13
+        }).getNumber('pr'); // precipitation band name
+      var centroid = feature.centroid();
+      var yr = ee.Number(Year).toInt()
+      return centroid.set({ppt: ppt_avg, Year: yr});
+  };
+
+  // Map function
+  var counties_ppt = counties.map(ppt_function);
+  return counties_ppt;
+} 
+
+// Create and export single dataframe with all years of interest (USGS Years 1985-2015 every 5years and data boundaries: 2008-2017)
+var counties_ppt = precip_export(1985).merge(precip_export(1990)).merge(precip_export(1995)).merge(precip_export(2000))
+                                      .merge(precip_export(2005)).merge(precip_export(2008)).merge(precip_export(2009))
+                                      .merge(precip_export(2010)).merge(precip_export(2011)).merge(precip_export(2012))
+                                      .merge(precip_export(2013)).merge(precip_export(2014)).merge(precip_export(2015))
+                                      .merge(precip_export(2016)).merge(precip_export(2017)).merge(precip_export(2018))
+                                      .merge(precip_export(2019)).merge(precip_export(2020))
+
+// Export (only have to do this once)
+Export.table.toDrive({
+  collection: counties_ppt,
+  description: 'county_annu_gridMET',
+  fileFormat: 'CSV',
+  folder: 'NAIWA_CONUS',
+  selectors: ['Year', 'ppt', 'COUNTYFP', 'STATEFP'] 
+});

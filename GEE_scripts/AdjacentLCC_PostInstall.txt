@@ -1,0 +1,118 @@
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                              Surrounding Landcover Post Install                                    #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+// Function for extracting CDL crop types year after installation
+var prepost_lc_conus_run = function(feature){
+  //###########################################################################
+  // Extract CDL croptype from shape
+  //###########################################################################
+  
+  // Set aoi
+  var crp_bnd = ee.Feature(feature.geometry().buffer(100));
+  var aoi = crp_bnd.difference(feature.geometry(), 1).geometry(); // Calculates differnce between 100m buffer and array shape
+  
+  // Get YOD
+  var YOD_temp = feature.get('Year'); //
+  
+  // Check if YOD exists, if not, get most recent land cover
+  var YOD = ee.Algorithms.If(ee.Number(YOD_temp).eq(-9999), 2019, YOD_temp);
+  
+  /////////// Get pre year lc types
+  
+  // CDL year (one year prior to YOD) -- croptype just before conversion
+  // Conus CDL is only available between 2008 and 2020, force this range for now
+  var cdl_bnds = [2008, 2020];
+  var cdl_year_temp = ee.Algorithms.If(ee.Number(YOD).lte(cdl_bnds[0]), cdl_bnds[0], ee.Number(YOD).subtract(1));
+  var cdl_year = ee.Algorithms.If(ee.Number(cdl_year_temp).gt(cdl_bnds[1]), cdl_bnds[1], ee.Number(cdl_year_temp));
+  var cdl_year_diff = ee.Number(cdl_year).subtract(2007);
+  var cdl_year_start = ee.Date('2007-01-01').advance(cdl_year_diff, 'year');
+  var cdl_year_end = ee.Date('2007-12-31').advance(cdl_year_diff, 'year');
+
+  // Call in CDL for renewable boundary
+  var Croptype = Cropland.filterDate(cdl_year_start, cdl_year_end)
+                  .first()
+                  .unmask(111) // open water
+                  .reproject('EPSG:4326', null, 30) 
+                  .clip(aoi);
+
+  // CDL landcover mode within renewable boundary
+  var CDL_crop_wnull = Croptype.reduceRegion({
+      reducer: ee.Reducer.mode({maxRaw: 1e6}),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('cropland');
+  // If no CDL detected within polygon, set to NA
+  var CDL_cropPre = ee.Number(ee.Algorithms.If(CDL_crop_wnull, CDL_crop_wnull, -9999)).toInt();
+  
+  //////// Get Post Year boundary crop types
+  
+  // CDL year (one year prior to YOD) -- croptype just before conversion
+  // Conus CDL is only available between 2008 and 2020, force this range for now
+  var cdl_bnds = [2008, 2020];
+  var cdl_year_temp = ee.Algorithms.If(ee.Number(YOD).lt(cdl_bnds[0]), cdl_bnds[0], ee.Number(YOD).add(1));
+  var cdl_year = ee.Algorithms.If(ee.Number(cdl_year_temp).gt(cdl_bnds[1]), cdl_bnds[1], ee.Number(cdl_year_temp));
+  var cdl_year_diff = ee.Number(cdl_year).subtract(2007);
+  var cdl_year_start = ee.Date('2007-01-01').advance(cdl_year_diff, 'year');
+  var cdl_year_end = ee.Date('2007-12-31').advance(cdl_year_diff, 'year');
+
+  // Call in CDL for renewable boundary
+  var Croptype = Cropland.filterDate(cdl_year_start, cdl_year_end)
+                  .first()
+                  .unmask(111) // open water
+                  .reproject('EPSG:4326', null, 30) 
+                  .clip(aoi);
+
+  // CDL landcover mode within renewable boundary
+  var CDL_crop_wnull = Croptype.reduceRegion({
+      reducer: ee.Reducer.mode({maxRaw: 1e6}),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('cropland');
+  // If no CDL detected within polygon, set to NA
+  var CDL_cropPost = ee.Number(ee.Algorithms.If(CDL_crop_wnull, CDL_crop_wnull, -9999)).toInt();
+
+  // Return the feature with the year set 
+  return feature.set({cdl_af1: CDL_cropPost, cdl_be1: CDL_cropPre});
+};
+
+//############################\\
+//        Run Function        \\
+//############################\\
+
+// CDL cropland image collection
+var Cropland = ee.ImageCollection('USDA/NASS/CDL').select('cropland');
+//var non_ag = [61, 63, 64, 65, 81, 82, 83, 87, 88, 92, 111, 112, 121, 122, 123, 124, 131, 141, 142, 143, 152, 190, 195] // Fallow/idle = non_ag, grassland = ag
+
+// CONUS Solar (ground-mounted, non-residential)
+var Solar = ee.FeatureCollection("users/stidjaco/CV_Solar_LCprep_rnd2");
+
+// Add arbitrary random number to subset conus solar -- Map solar functions -- Split dataset for export, prevents overload ee memory
+var Solar = Solar.randomColumn("subset", 15, "uniform");
+var Solar = Solar.map(function(feature){return feature.set({subset: feature.getNumber("subset").multiply(1000).toInt()})});
+
+// Run solar export (generate sequence to run over)
+var step = 100; // this determines how many exports to divide export into 
+var start = 0; var end = ee.Number(1000).subtract(step).getInfo();
+var sequence = ee.List.sequence({start: start, end: end, step: step}).getInfo();
+var solar_export = sequence.map(function(subset){
+  // Get random subselection
+  var Solar_temp = Solar.filter(ee.Filter.and(ee.Filter.gte("subset", subset), ee.Filter.lt("subset", ee.Number(subset).add(step))));
+  
+  // Perform .map() functions
+  var Solar_output = Solar_temp.map(prepost_lc_conus_run); // Function to extract CDL and LCMAP year after installation
+
+  // Export Solar CSV to drive
+  var subset_name = ee.Number(subset).getInfo();
+  Export.table.toDrive({
+    collection: Solar_output,
+    description:'Solar_AdjacentLCC_PostInstall_'+subset_name,
+    fileFormat: 'CSV',
+    folder: 'GEE_outputCONUS',
+    selectors: ['Index', 'Year', 'cdl_af1', 'cdl_be1'
+    ]}); 
+});

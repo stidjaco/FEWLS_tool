@@ -1,0 +1,48 @@
+//########################################################################################################################################## 
+//#                                                                                                                                      #\\
+//#                                          PV Omitted from Stid et al but in Kruitwagen et al.                                         #\\
+//#                                                                                                                                      #\\
+//##########################################################################################################################################
+
+//############################\\
+//       Input Variables      \\
+//############################\\
+
+// Call in states to get US, subset to CONUS, add additional buffer by 100km to ensure offshore wind isnt removed
+var CONUS = ee.FeatureCollection("users/stidjaco/CONUS_shp");
+
+// CONUS Solar (ground-mounted, non-residential) -- Not actually conus solar in this script, just omitted from stid et al but in Kruitwagen et al.
+var CONUS_Solar = ee.FeatureCollection("users/stidjaco/PV_stid_omit")//.limit({max: 25, ascending: false}); // Limits featureCollection for method development
+
+//##################################\\
+//  Load CONUS Renewable Module.js  \\
+//##################################\\
+
+// Load Module
+var conus_funcs = require('users/stidjaco/PhotoVoltaics:PV_FEWC/YOD_LT_get.js');
+
+// Add arbitrary random number to subset conus solar -- Map solar functions -- Split dataset for export, overload ee memory
+var CONUS_Solar = CONUS_Solar.randomColumn("subset", 15, "uniform");
+var CONUS_Solar = CONUS_Solar.map(function(feature){return feature.set({subset: feature.getNumber("subset").multiply(1000).toInt()})})
+var conus_solar_export = [0,200,400,600,800].map(function(subset){  
+  // Get random subselection
+  var CONUS_Solar_temp = CONUS_Solar.filter(ee.Filter.and(ee.Filter.gte("subset", subset), ee.Filter.lt("subset", ee.Number(subset).add(200))));
+  
+  // Perform functions
+  var CONUS_Solar_temp = CONUS_Solar_temp.map(conus_funcs.rm_nonpanel);
+  var CONUS_SolarGEOBIA = CONUS_Solar_temp.filter(ee.Filter.eq("rm_array", "No")).map(conus_funcs.geobia_conus_run);
+  var CONUS_SolarRmArray = CONUS_Solar_temp.filter(ee.Filter.eq("rm_array", "Yes")).map(conus_funcs.rm_array_geobia);
+  var CONUS_Solar_temp = CONUS_SolarGEOBIA.merge(CONUS_SolarRmArray); 
+  var CONUS_Solar_temp = CONUS_Solar_temp.map(conus_funcs.lt_solar_run).map(conus_funcs.lc_conus_run); 
+  var subset_name = ee.Number(subset).getInfo();
+  
+  // Export Solar CSV to drive
+  Export.table.toDrive({
+    collection: CONUS_Solar_temp,
+    description:"FEWE_stid_omit_"+subset_name,
+    fileFormat: 'CSV',
+    folder: 'GEE_output',
+    selectors: ['Index', 'Yr_inst', 'cdl_1yr', 'lcmap_lc', 'PF', 'Source', 'dir_a', 
+                'pnl_cnt', 'pnl_a', 'mount', 'cap_mw', 'rooftop', 'Tech']
+  });
+});

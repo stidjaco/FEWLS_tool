@@ -1,0 +1,110 @@
+//######################################################################################################## 
+//#                                                                                                    #\\
+//#                                 Landcover (LCMAP & CDL) function                                   #\\
+//#                                                                                                    #\\
+//########################################################################################################
+
+// Function for extracting CDL crop types
+var lc_run = function(feature){
+  //###########################################################################
+  // Extract CDL croptype from shape
+  //###########################################################################
+  
+  // Set aoi
+  var aoi = feature.geometry();
+  
+  // Get YOD
+  var YOD_temp = feature.getNumber('Yr_inst');
+  
+  // Check if YOD exists, if not, get most recent land cover
+  var YOD = ee.Number(ee.Algorithms.If(ee.Number(YOD_temp).eq(-9999), 2019, YOD_temp)).subtract(year_prior).add(1);
+  
+  // Get LCMAP landcover classification
+  var lcmap_bnds = [1985, 2019];
+  var lcmap_year_temp = ee.Algorithms.If(ee.Number(YOD).lt(lcmap_bnds[0]), lcmap_bnds[0], ee.Number(YOD));
+  var lcmap_year = ee.Algorithms.If(ee.Number(lcmap_year_temp).gt(lcmap_bnds[1]), lcmap_bnds[1], ee.Number(lcmap_year_temp));
+  var lcmap_year_diff = ee.Number(lcmap_year).subtract(1984);
+  var lcmap_year_start = ee.Date('1984-01-01').advance(lcmap_year_diff, 'year');
+  var lcmap_year_end = ee.Date('1984-12-31').advance(lcmap_year_diff, 'year');
+  
+  // Call in LCMAP for renewable boundary
+  var lcmap_landcover = LCMAP.filterDate(lcmap_year_start, lcmap_year_end)
+    .median()
+    .unmask(5) // open water
+    .reproject('EPSG:4326', null, 30)
+    .clip(aoi); 
+  
+  // CDL year (one year prior to YOD) -- croptype just before conversion
+  // Conus CDL is only available between 2008 and 2020, force this range for now
+  var cdl_bnds = [2008, 2020];
+  var cdl_year_temp = ee.Algorithms.If(ee.Number(YOD).lte(cdl_bnds[0]), cdl_bnds[0], ee.Number(YOD).subtract(1));
+  var cdl_year = ee.Algorithms.If(ee.Number(cdl_year_temp).gt(cdl_bnds[1]), cdl_bnds[1], ee.Number(cdl_year_temp));
+  var cdl_year_diff = ee.Number(cdl_year).subtract(2007);
+  var cdl_year_start = ee.Date('2007-01-01').advance(cdl_year_diff, 'year');
+  var cdl_year_end = ee.Date('2007-12-31').advance(cdl_year_diff, 'year');
+
+  // Call in CDL for renewable boundary
+  var Croptype = Cropland.filterDate(cdl_year_start, cdl_year_end)
+                  .first()
+                  .unmask(111) // open water
+                  .reproject('EPSG:4326', null, 30) 
+                  .clip(aoi);
+
+  // CDL landcover mode within renewable boundary
+  var CDL_crop_wnull = Croptype.reduceRegion({
+      reducer: ee.Reducer.mode(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('cropland');
+  // If no CDL detected within polygon, set to NA
+  var CDL_crop = ee.Number(ee.Algorithms.If(CDL_crop_wnull, CDL_crop_wnull, -9999)).toInt();
+    
+  // LCMAP landcover mode within renewable boundary
+  var lcmap_lc_wnull = lcmap_landcover.reduceRegion({
+      reducer: ee.Reducer.mode(),
+      geometry: aoi,
+      scale: 30,
+      maxPixels: 1e13
+    }).getNumber('b1');
+  // If no LCMAP values detected within polygon, set to NA
+  var lcmap_lc = ee.Number(ee.Algorithms.If(lcmap_lc_wnull, lcmap_lc_wnull, -9999)).toInt();
+
+  // Return the feature with the year set 
+  return feature.set({cdl_yr: CDL_crop, lcmap_lc: lcmap_lc, yr_prior: year_prior});
+};
+
+//###########################################################################
+// Pull in datasets and run function
+//###########################################################################
+
+// CDL cropland image collection
+var Cropland = ee.ImageCollection('USDA/NASS/CDL').select('cropland');
+
+// Get LCMAP
+var LCMAP = ee.ImageCollection("projects/sat-io/open-datasets/LCMAP/LCPRI").select('b1');
+
+// CONUS Solar (ground-mounted, non-residential) -- Not actually conus solar in this script, just omitted from stid et al but in Kruitwagen et al.
+var solar_shps = ee.FeatureCollection("users/stidjaco/Stidetal_OmitKruit_PV_ID_cropRot"); 
+
+// Map over subsequent previous years
+var year_prior = 1; var solar_shps_yr1 = solar_shps.map(lc_run); 
+var year_prior = 2; var solar_shps_yr2 = solar_shps.map(lc_run); 
+var year_prior = 3; var solar_shps_yr3 = solar_shps.map(lc_run);
+var year_prior = 4; var solar_shps_yr4 = solar_shps.map(lc_run);
+var year_prior = 5; var solar_shps_yr5 = solar_shps.map(lc_run);
+
+// Merge and Flatten
+var solar_shps_flat = solar_shps_yr1.merge(solar_shps_yr2).merge(solar_shps_yr3).merge(solar_shps_yr4).merge(solar_shps_yr5); //print(solar_shps_flat)
+
+// Export Solar CSV to drive
+Export.table.toDrive({
+  collection: solar_shps_flat,
+  description:'kruit_stid_yrPriorcrops',
+  fileFormat: 'CSV',
+  folder: 'GEE_output',
+  selectors: ['Index', 'Yr_inst', 'cdl_yr', 'lcmap_lc', 'yr_prior']
+});
+
+
+

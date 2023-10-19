@@ -1,0 +1,116 @@
+//############################################################################\\
+///////////////////////////////// Get Inputs \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+//############################################################################\\
+
+// Years 
+var Years = [2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018]
+
+// CDL cropland image collection
+var Cropland = ee.ImageCollection('USDA/NASS/CDL').select('cropland');
+
+// Central Valley -- Simplified and interior shapes removed
+var CV_complex = ee.FeatureCollection('users/stidjaco/CV_Boundary').map(function(feature) {
+    return feature.simplify({maxError: 1000});   })
+var CV = ee.FeatureCollection(ee.Feature(ee.Geometry.Polygon(CV_complex.first().geometry().coordinates().get(0)))) // Grabs first and larges poly
+
+// Get CV counties
+var counties = ee.FeatureCollection('TIGER/2018/Counties').filterMetadata('STATEFP', 'equals', '06').filterBounds(CV)
+  // Simplify counties
+  .map(function(feature) {
+      return feature.simplify({maxError: 500});   })
+  // Get intersection with CV
+  .map(function(feature){
+    var aoi = feature.geometry()
+    var cv_bnd = CV.geometry()
+    var new_geom = aoi.intersection({'right': cv_bnd, 'maxError': 1})
+    return feature.setGeometry(new_geom)          });
+    
+// TEMP -- make CV counties to test toInt() issue
+var counties = CV
+
+// CDL list with all ag crop values -- DOES NOT INCLUDE FALLOW/IDLE
+var crop_list = [1,2,3,4,5,6,10,11,12,13,14,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+                41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,62,66,67,68,69,70,
+                71,72,73,74,75,76,77,176,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,
+                225,226,227,229,230,231,232,233,234,235,236,237,238,239,240,241,242,243,244,245,246,247,
+                248,249,250,254];
+
+//############################################################################\\
+///////////////////// Function for annual output \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+//############################################################################\\
+
+// Run solar export
+var cv_agland_export = function(feature){
+  //##############################################\\
+  ///////////// Get AOI, Central Valley\\\\\\\\\\\\\
+  //##############################################\\
+  
+  // AOI
+  var aoi = feature.geometry()
+
+  //##############################################\\
+  ///////////// Get CDL for given Year \\\\\\\\\\\\\
+  //##############################################\\
+
+  // CDL cropland image collection
+  var CDL = Cropland.filterDate(Year+'-1-01', Year+'-12-31')
+                  .first()
+                  .unmask(111) // open water
+                  .reproject('EPSG:4326', null, 30) 
+                  .clip(aoi);
+  
+  // Get cdl into areaImage of active ag area, masks everything not in crop_list
+  var active_ag = CDL.updateMask(CDL.eq(ee.Image.constant(crop_list)).reduce(ee.Reducer.anyNonZero())).unmask(0).gt(0)
+
+  //##############################################\\
+  ////////////// Get Active Ag Area \\\\\\\\\\\\\\
+  //##############################################\\
+  
+  // Get NAIP scale (either 1m or 0.6m depending on date and state
+  var scale = ee.Number(active_ag.reproject('EPSG:5070', null).projection().nominalScale());
+  
+  // Compute pixel area function
+  var areaImage = active_ag.reproject({crs: 'EPSG:5070', scale: scale});
+  
+  // Calculate the panel area
+  var ag_area = areaImage.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: aoi,
+    scale: scale,
+    maxPixels: 1e13
+  }).getNumber('cropland');
+
+  // If no panel area within shape, set to null (in %)
+  var ag_ar = ee.Number(ee.Algorithms.If(ag_area, ee.Number(ag_area).divide(1000000), -9999)).toInt();
+  return feature.set({ag_ar: ag_ar, Year: Year})
+};
+
+// Map for all years
+var Year = 2008; var fi08 = counties.map(cv_agland_export)
+var Year = 2009; var fi09 = counties.map(cv_agland_export)
+var Year = 2010; var fi10 = counties.map(cv_agland_export)
+var Year = 2011; var fi11 = counties.map(cv_agland_export)
+var Year = 2012; var fi12 = counties.map(cv_agland_export)
+var Year = 2013; var fi13 = counties.map(cv_agland_export)
+var Year = 2014; var fi14 = counties.map(cv_agland_export)
+var Year = 2015; var fi15 = counties.map(cv_agland_export)
+var Year = 2016; var fi16 = counties.map(cv_agland_export)
+var Year = 2017; var fi17 = counties.map(cv_agland_export)
+var Year = 2018; var fi18 = counties.map(cv_agland_export)
+// Years post analysis
+var Year = 2019; var fi19 = counties.map(cv_agland_export)
+var Year = 2020; var fi20 = counties.map(cv_agland_export)
+var Year = 2021; var fi21 = counties.map(cv_agland_export)
+
+// Merege 
+//var ag_export = fi08.merge(fi09).merge(fi10).merge(fi11).merge(fi11).merge(fi12).merge(fi13).merge(fi14).merge(fi15).merge(fi16).merge(fi17).merge(fi18)
+var ag_export = fi19.merge(fi20).merge(fi21)
+
+// Export Solar CSV to drive
+Export.table.toDrive({
+  collection: ag_export,
+  description:'cv_active_ag_area_thru2021',
+  fileFormat: 'CSV',
+  folder: 'GEE_outputCONUS',
+  selectors: ['Year', 'ag_ar'
+  ]}); 
