@@ -422,7 +422,7 @@ getResource_foodkcal = function(in_df){
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # Water Use Projections and irrigation energy requirements
-getResource_irrigWater = function(in_df, irrig_energy = FALSE, irrig_energy_per_m2 = FALSE, include_oandm = FALSE){
+getResource_irrigWater = function(in_df, waterRedist = FALSE, irrig_energy = FALSE, irrig_energy_per_m2 = FALSE, include_oandm = FALSE){
   # ------------------------- #
   #    Get Non User Inputs    # 
   # ------------------------- #
@@ -693,6 +693,15 @@ getResource_irrigWater = function(in_df, irrig_energy = FALSE, irrig_energy_per_
   #crop_water$irrig_fg_wet <- (crop_water$irrig_rl13 + crop_water$irrig_rl18) / 2
   crop_water$irrig_rl13 = NULL
   crop_water$irrig_rl18 = NULL
+
+  # ------------------------------------------------- #
+  # Decide Irrigation water use saved or energy saved # -- Sensitivity Analysis suggested by Reviewer 2
+  # ------------------------------------------------- #
+  if(waterRedist==TRUE){
+    waterRedistFactor = 0.5 # 50% of irrigation water use offset by agrisolar area is redistributed to surrounding cropland 
+    waterCols <- c("irrig_fg", "irrig_fg_dry", "irrig_fg_wet")
+    crop_water[, waterCols] <- crop_water[, waterCols] * waterRedistFactor
+  }
 
   # ------------------------------------------------- #
   # Decide Irrigation water use saved or energy saved # 
