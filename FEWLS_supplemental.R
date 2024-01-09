@@ -580,8 +580,8 @@ df_food = data.frame(Resoruce = "Displaced Food (kcal)",
                      Worst = "Average-yielding land (0% yield deficit) was displaced with increases (0.8%/yr) average yields through time.")
 df_energy = data.frame(Resoruce = "Generated Energy (GWh)", 
                        Baseline = "Installed PV modules were a mix of mono-Si and muli-Si with the avearge reported efficiency for a given installation year (Supplementary Fig. 4).", 
-                       Best = "Installed PV modules were entirely mono-Si extrapolated efficiency for a given installation year (Supplementary Fig. 4).", 
-                       Worst = "Installed PV modules were a entirely muli-Si with extrapolated efficiency for a given installation year (Supplementary Fig. 4).")
+                       Best = "Installed PV modules were entirely mono-Si extrapolated efficiency for a given installation year (Supp. Fig. 4).", 
+                       Worst = "Installed PV modules were a entirely muli-Si with extrapolated efficiency for a given installation year (Supp. Fig. 4).")
 df_water = data.frame(Resoruce = "Saved Irrigation Water (mil-m3)", 
                       Baseline = "Average irrigation depth prediction between FRIS and IWMS, and avearge annual precipitation during the addition phase projected forward.", 
                       Best = "Maximum irrigation depth prediction between FRIS and IWMS, and highest offset irrigation water use due to estimted precipitaiton of driest year during the addition phase projected forward.", 
@@ -598,31 +598,31 @@ df = rbind(df_food, df_energy, df_water, df_irrigEn, df_oandmwu)
 # Clean pub datatable
 library(gt)
 df_export <- df %>% gt()
-gtsave(df_export, paste("Outputs/Dataframes/Resource_Scenario_Descriptions.png", sep = ""))
+gtsave(df_export, paste("Outputs/Dataframes/Resource_Scenario_Descriptions.png", sep = ""), vwidth = 1000, vheight = 1800)
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ECON
 
 # Set to three significant figures for base/best/worst
 df_nem = data.frame(Resoruce = "Cash Flow Saved (Offset Load) and Earned (Surplus Generation NEM), Commercial-Scale", 
-                    Baseline = "Same scenario as baseline Generated Energy (Supplementary Fig. 14), with utility-specific energy charge rates and Annual Energy Outlook projected changes in electricity prices.", 
-                    Best = "Same scenario as best-case Generated Energy (Supplementary Fig. 14), with utility-specific energy charge rates and Annual Energy Outlook projected changes in electricity prices.", 
-                    Worst = "Same scenario as worst-case Generated Energy (Supplementary Fig. 14), with utility-specific energy charge rates and Annual Energy Outlook projected changes in electricity prices.")
+                    Baseline = "Same scenario as baseline Generated Energy (Supp. Table 18), with utility-specific energy charge rates and Annual Energy Outlook projected changes in electricity prices.", 
+                    Best = "Same scenario as best-case Generated Energy (Supp. Table 18), with utility-specific energy charge rates and Annual Energy Outlook projected changes in electricity prices.", 
+                    Worst = "Same scenario as worst-case Generated Energy (Supp. Table 18), with utility-specific energy charge rates and Annual Energy Outlook projected changes in electricity prices.")
 df_landlease = data.frame(Resoruce = "Cash Flow from Annual Land Lease Contract, Utility-Scale", 
                           Baseline = "Average consultant and industry reported land lease contract rate ($2,450/ha/yr).", 
                           Best = "High consultant and industry reported land lease contract rate ($4,950/ha/yr).", 
                           Worst = "Low consultant and industry reported land lease contract rate ($750/ha/yr).")
 df_food = data.frame(Resoruce = "Forgone Crop Cash Flow", 
-                     Baseline = "Same scenario as baseline Displaced Food (Supplementary Fig. 14), with food prices scaling with projected changes in electricity prices.", 
-                     Best = "Same scenario as best-case Displaced Food (Supplementary Fig. 14), with food prices scaling with projected changes in electricity prices.", 
-                     Worst = "Same scenario as worst-case Displaced Food (Supplementary Fig. 14), with food prices scaling with projected changes in electricity prices.")
+                     Baseline = "Same scenario as baseline Displaced Food (Supp. Table 18), with food prices scaling with projected changes in electricity prices.", 
+                     Best = "Same scenario as best-case Displaced Food (Supp. Table 18), with food prices scaling with projected changes in electricity prices.", 
+                     Worst = "Same scenario as worst-case Displaced Food (Supp. Table 18), with food prices scaling with projected changes in electricity prices.")
 df_operation = data.frame(Resoruce = "Saved Cash Flow from Business as Usual Farm Operation", 
                           Baseline = "Same scenario as baseline Forgone Crop Cash Flow, with costs represented in USD/kg to produce.", 
                           Best = "Same scenario as best-case Forgone Crop Cash Flow, with costs represented in USD/kg to produce.", 
                           Worst = "Same scenario as worst-case Forgone Crop Cash Flow, with costs represented in USD/kg to produce.")
 df_water = data.frame(Resoruce = "Cash Flow from Change in Water Budget", 
-                      Baseline = "Baseline scenario for Saved Irrigation Water minus baseline scenario for O&M Water Use (Supplementary Fig. 14), with constant irrigation energy requirement cost (Cash flow saved and earned). with a CCV-wide water right rate.", 
-                      Best = "Best-case scenario for Saved Irrigation Water minus best-case scenario for O&M Water Use (Supplementary Fig. 14), with constant irrigation energy requirement cost (Cash flow saved and earned). with a CCV-wide water right rate.", 
-                      Worst = "Worst-case scenario for Saved Irrigation Water minus worst-case scenario for O&M Water Use (Supplementary Fig. 14), with constant irrigation energy requirement cost (Cash flow saved and earned). with a CCV-wide water right rate.")
+                      Baseline = "Baseline scenario for Saved Irrigation Water minus baseline scenario for O&M Water Use (Supp. Table 18), with constant irrigation energy requirement cost (Cash flow saved and earned). with a CCV-wide water right rate.", 
+                      Best = "Best-case scenario for Saved Irrigation Water minus best-case scenario for O&M Water Use (Supp. Table 18), with constant irrigation energy requirement cost (Cash flow saved and earned). with a CCV-wide water right rate.", 
+                      Worst = "Worst-case scenario for Saved Irrigation Water minus worst-case scenario for O&M Water Use (Supp. Table 18), with constant irrigation energy requirement cost (Cash flow saved and earned). with a CCV-wide water right rate.")
 df_oandm= data.frame(Resoruce = "Cash Flow to O&M", 
                      Baseline = "Average O&M costs from NREL Cost Benchmark. Projections of fixed O&M costs under the 'moderate' Annual Technology Basline scenario", 
                      Best = "Lowest O&M costs from NREL Cost Benchmark. Projections of fixed O&M costs under the 'advanced' Annual Technology Basline scenario", 
@@ -635,7 +635,7 @@ df = rbind(df_nem, df_landlease, df_food, df_operation, df_water, df_oandm, df_i
 # Clean pub datatable
 library(gt)
 df_export <- df %>% gt()
-gtsave(df_export, paste("Outputs/Dataframes/Economic_Scenario_Descriptions.png", sep = ""))
+gtsave(df_export, paste("Outputs/Dataframes/Economic_Scenario_Descriptions.png", sep = ""), vwidth = 1000, vheight = 1800) # not sure why these heights and widths work
 
 
 
