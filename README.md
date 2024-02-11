@@ -1,17 +1,16 @@
 ### SOLAR FEWLS TOOL 
 
 
-Last Updated: 08/31/2023
+Last Updated: 02/11/2024
 Primary Contact: Jacob Stid (stidjaco@msu.edu)
 
 
 General Notes: 
 This is the general information README document for code, data, and logic behind the Solar Food, Energy, Water, and Economic Lifecycle Scenario (FEWLS) Tool. 
-The FEWLS tool was developed and used in the research article, **From Fields to Photovoltaics: Effects of Agrisolar Co-Location on Food, Energy, Water, and 
-Economic Security**. In general, this code takes in a ground-mounted solar PV shape file (with some auxiliary information described below) and generates 
-lifespan predictions for food, energy, water, and economic effects due to offsetting agricultural land with solar PV energy generation 
-(*agrisolar co-location*). The code and data repository can be found at the github/stidjaco page upon request: 
-https://gitlab.msu.edu/hydrogeology/code-projects/fewls_tool.git
+The FEWLS tool was developed and used in the research article, **Enhancing water and economic security in irrigated regions with agrisolar co-location**. In 
+general, this code takes in a ground-mounted solar PV shape file (with some auxiliary information described below) and generates lifespan predictions for 
+food, energy, water, and economic effects due to offsetting agricultural land with solar PV energy generation (*agrisolar co-location*). The code and data 
+repository can be found at the github/stidjaco page upon request: https://gitlab.msu.edu/hydrogeology/code-projects/fewls_tool.git
 
 
 Running FEWLS: 
