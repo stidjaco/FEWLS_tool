@@ -108,7 +108,7 @@ As long as an auxiliary dataset contains the same formatting, column nomenclatur
 ## 
 // Description: Folder containing the input solar PV installation shape file
 * Files: 
-** CV_Agrisolar_df.shp: The driving data behind the FEWLS model. It contains 935 solar PV arrays with the spatiotemporal attributes described above in *Solar PV Spatiotemporally Characterized Dataset*.
+ * CV_Agrisolar_df.shp: The driving data behind the FEWLS model. It contains 935 solar PV arrays with the spatiotemporal attributes described above in *Solar PV Spatiotemporally Characterized Dataset*.
 
 
 
