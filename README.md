@@ -77,7 +77,7 @@ As long as an auxiliary dataset contains the same formatting, column nomenclatur
 
 
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FEWLS Repository Folder & File Descriptions
+
 
 
 
@@ -101,18 +101,18 @@ As long as an auxiliary dataset contains the same formatting, column nomenclatur
 
 
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ CV_Agrisolar_df
 
 
 
-## 
+
+## CV_Agrisolar_df
 // Description: Folder containing the input solar PV installation shape file
 * Files: 
  * CV_Agrisolar_df.shp: The driving data behind the FEWLS model. It contains 935 solar PV arrays with the spatiotemporal attributes described above in *Solar PV Spatiotemporally Characterized Dataset*.
 
 
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GEE_scripts
+
 
 
 
@@ -132,7 +132,7 @@ As long as an auxiliary dataset contains the same formatting, column nomenclatur
 
 
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ pvlib_Analysis
+
 
 
 
@@ -162,7 +162,7 @@ As long as an auxiliary dataset contains the same formatting, column nomenclatur
 
 
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Data
+
 
 
 
@@ -293,7 +293,7 @@ As long as an auxiliary dataset contains the same formatting, column nomenclatur
 
 
 
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Outputs
+
 
 
 
