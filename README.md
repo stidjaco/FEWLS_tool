@@ -4,7 +4,7 @@ Last Updated: 05/02/2023
 Primary Contact: Jacob Stid (stidjaco@msu.edu)
 
 Release Notes: 
-* May 2nd, 2024: Included crop_values_CA_05_18.csv in Data/Downloaded.
+* February 18, 2025: Included crop_values_CA_05_18.csv in Data/Downloaded and all scenario outputs in Outputs.
 * October 21, 2023: Initial release.
 
 
